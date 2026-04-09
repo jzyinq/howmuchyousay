@@ -6,7 +6,9 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jzy/howmuchyousay/internal/models"
 	"github.com/jzy/howmuchyousay/internal/store"
+	"github.com/stretchr/testify/require"
 )
 
 func setupTestDB(t *testing.T) *pgxpool.Pool {
@@ -44,4 +46,14 @@ func cleanupTestDB(t *testing.T, pool *pgxpool.Pool) {
 			t.Logf("Warning: failed to clean table %s: %v", table, err)
 		}
 	}
+}
+
+// createTestShop creates a shop for testing purposes.
+func createTestShop(t *testing.T, pool *pgxpool.Pool, url string) *models.Shop {
+	t.Helper()
+	ctx := context.Background()
+	shopStore := store.NewShopStore(pool)
+	shop, err := shopStore.Create(ctx, url)
+	require.NoError(t, err)
+	return shop
 }
