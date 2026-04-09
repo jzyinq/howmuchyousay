@@ -1,0 +1,23 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: hmys
+      POSTGRES_PASSWORD: hmys_dev
+      POSTGRES_DB: howmuchyousay
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  postgres-test:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: hmys
+      POSTGRES_PASSWORD: hmys_test
+      POSTGRES_DB: howmuchyousay_test
+    ports:
+      - "5433:5432"
+
+volumes:
+  pgdata:

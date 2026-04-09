@@ -1,0 +1,24 @@
+# Binaries
+bin/
+backend/server
+backend/crawler
+
+# Environment
+.env
+
+# Logs
+backend/logs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+
+# Go
+vendor/
+
+# Docker volumes
+pgdata/
