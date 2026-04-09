@@ -83,3 +83,11 @@ func (s *CrawlStore) Finish(ctx context.Context, id uuid.UUID, status models.Cra
 	)
 	return err
 }
+
+func (s *CrawlStore) UpdateLogPath(ctx context.Context, id uuid.UUID, logFilePath string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE crawls SET log_file_path = $1 WHERE id = $2`,
+		logFilePath, id,
+	)
+	return err
+}
