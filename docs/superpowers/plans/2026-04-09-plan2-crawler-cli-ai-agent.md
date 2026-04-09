@@ -6,7 +6,7 @@
 
 **Architecture:** The crawler package (`internal/crawler/`) is a self-contained component used by both the CLI binary and the game server. All external dependencies (HTTP client, AI API) are behind interfaces for testability. The crawler orchestrator ties together: fetching pages, extracting structured data, falling back to AI extraction, validating products, and persisting results via the store layer (from Plan 1). Tests use `httptest` servers and mock AI clients - no real network calls.
 
-**Tech Stack:** Go 1.23+, `net/http` + `httptest`, `encoding/json`, OpenAI API (GPT-5 mini), `golang.org/x/time/rate` (rate limiter), stores from Plan 1
+**Tech Stack:** Go 1.23+, `net/http` + `httptest`, `encoding/json`, `github.com/openai/openai-go/v3` (official OpenAI Go SDK), `golang.org/x/time/rate` (rate limiter), stores from Plan 1
 
 **Plan sequence:** This is Plan 2 of 5:
 1. Database, Models & Store Layer (done)
@@ -47,7 +47,7 @@ Each file has a single responsibility:
 - **fetcher.go** - HTTP requests with rate limiting (1 req/s) and robots.txt checking
 - **extractor.go** - Parse HTML for structured product data (JSON-LD `@type: Product`, Open Graph). Note: microdata is mentioned in the spec but skipped here (YAGNI) - JSON-LD + OG covers 95%+ of real shops. Can be added later if needed.
 - **validator.go** - Validate extracted products (price > 0, name not empty, URL valid) + deduplicate by normalized name
-- **ai_client.go** - Interface for AI product extraction + OpenAI implementation
+- **ai_client.go** - Interface for AI product extraction + OpenAI implementation using official `openai-go` SDK
 - **logger.go** - Structured per-crawl file logging with log levels (FETCH, PARSE, AI_REQUEST, AI_RESPONSE, NAVIGATE, PRODUCT_FOUND, VALIDATION, ERROR)
 - **crawler.go** - Main orchestrator: runs the full crawl pipeline, coordinates all components, reports progress via callback
 
@@ -1321,15 +1321,21 @@ git commit -m "feat(crawler): add per-crawl file logger with structured log leve
 
 ---
 
-### Task 6: AI Client (Interface + OpenAI Implementation)
+### Task 6: AI Client (Interface + OpenAI SDK Implementation)
 
 **Files:**
 - Create: `backend/internal/crawler/ai_client.go`
 - Create: `backend/internal/crawler/ai_client_test.go`
 
-The AI client sends HTML to GPT-5 mini and receives structured product data. We define an interface so the crawler can be tested with a mock. The OpenAI implementation is also tested using an `httptest` server that mimics the OpenAI API.
+The AI client sends HTML to GPT-5 mini and receives structured product data. We define an interface so the crawler can be tested with a mock. The OpenAI implementation uses the **official `openai-go` SDK** (`github.com/openai/openai-go/v3`) which provides type safety, automatic retries, and structured outputs. Tests use `httptest` servers with `option.WithBaseURL` to mock the API.
 
-- [ ] **Step 1: Write failing tests for AIClient**
+- [ ] **Step 1: Install OpenAI Go SDK**
+
+```bash
+cd backend && go get github.com/openai/openai-go/v3
+```
+
+- [ ] **Step 2: Write failing tests for AIClient**
 
 Create `backend/internal/crawler/ai_client_test.go`:
 
@@ -1353,20 +1359,27 @@ func TestOpenAIClient_ExtractProducts(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Verify request structure
 		assert.Equal(t, "POST", r.Method)
-		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
 		assert.Contains(t, r.Header.Get("Authorization"), "Bearer ")
 
 		// Return a mock response with extracted products
 		resp := map[string]interface{}{
+			"id":      "chatcmpl-test",
+			"object":  "chat.completion",
+			"model":   "gpt-5-mini",
 			"choices": []map[string]interface{}{
 				{
+					"index": 0,
 					"message": map[string]interface{}{
+						"role":    "assistant",
 						"content": `[{"name":"Laptop Dell XPS 15","price":5999.99,"image_url":"https://img.com/dell.jpg"},{"name":"iPhone 15 Pro","price":5499.00,"image_url":"https://img.com/iphone.jpg"}]`,
 					},
+					"finish_reason": "stop",
 				},
 			},
 			"usage": map[string]interface{}{
-				"total_tokens": 500,
+				"prompt_tokens":     100,
+				"completion_tokens": 400,
+				"total_tokens":      500,
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -1374,7 +1387,7 @@ func TestOpenAIClient_ExtractProducts(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := crawler.NewOpenAIClient("test-api-key", server.URL)
+	client := crawler.NewOpenAIClient("test-api-key", "gpt-5-mini", server.URL)
 	ctx := context.Background()
 
 	products, tokensUsed, err := client.ExtractProducts(ctx, "<html><body>Product page HTML</body></html>", "https://shop.com/products")
@@ -1389,15 +1402,23 @@ func TestOpenAIClient_ExtractProducts(t *testing.T) {
 func TestOpenAIClient_ExtractLinks(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]interface{}{
+			"id":      "chatcmpl-test",
+			"object":  "chat.completion",
+			"model":   "gpt-5-mini",
 			"choices": []map[string]interface{}{
 				{
+					"index": 0,
 					"message": map[string]interface{}{
+						"role":    "assistant",
 						"content": `["/products/laptops","/products/phones","/category/electronics"]`,
 					},
+					"finish_reason": "stop",
 				},
 			},
 			"usage": map[string]interface{}{
-				"total_tokens": 200,
+				"prompt_tokens":     50,
+				"completion_tokens": 150,
+				"total_tokens":      200,
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -1405,7 +1426,7 @@ func TestOpenAIClient_ExtractLinks(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := crawler.NewOpenAIClient("test-api-key", server.URL)
+	client := crawler.NewOpenAIClient("test-api-key", "gpt-5-mini", server.URL)
 	ctx := context.Background()
 
 	links, tokensUsed, err := client.ExtractLinks(ctx, "<html><body>Category page</body></html>", "https://shop.com")
@@ -1418,11 +1439,11 @@ func TestOpenAIClient_ExtractLinks(t *testing.T) {
 func TestOpenAIClient_HandlesAPIError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
-		w.Write([]byte(`{"error":{"message":"Rate limit exceeded"}}`))
+		w.Write([]byte(`{"error":{"message":"Rate limit exceeded","type":"rate_limit_error"}}`))
 	}))
 	defer server.Close()
 
-	client := crawler.NewOpenAIClient("test-api-key", server.URL)
+	client := crawler.NewOpenAIClient("test-api-key", "gpt-5-mini", server.URL)
 	ctx := context.Background()
 
 	_, _, err := client.ExtractProducts(ctx, "<html></html>", "https://shop.com")
@@ -1433,15 +1454,23 @@ func TestOpenAIClient_HandlesAPIError(t *testing.T) {
 func TestOpenAIClient_HandlesInvalidJSON(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]interface{}{
+			"id":      "chatcmpl-test",
+			"object":  "chat.completion",
+			"model":   "gpt-5-mini",
 			"choices": []map[string]interface{}{
 				{
+					"index": 0,
 					"message": map[string]interface{}{
+						"role":    "assistant",
 						"content": "This is not valid JSON at all",
 					},
+					"finish_reason": "stop",
 				},
 			},
 			"usage": map[string]interface{}{
-				"total_tokens": 100,
+				"prompt_tokens":     50,
+				"completion_tokens": 50,
+				"total_tokens":      100,
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -1449,7 +1478,7 @@ func TestOpenAIClient_HandlesInvalidJSON(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := crawler.NewOpenAIClient("test-api-key", server.URL)
+	client := crawler.NewOpenAIClient("test-api-key", "gpt-5-mini", server.URL)
 	ctx := context.Background()
 
 	products, _, err := client.ExtractProducts(ctx, "<html></html>", "https://shop.com")
@@ -1459,12 +1488,12 @@ func TestOpenAIClient_HandlesInvalidJSON(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [ ] **Step 3: Run tests to verify they fail**
 
 Run: `cd backend && go test ./internal/crawler/ -v -run TestOpenAIClient -count=1`
 Expected: FAIL - `crawler.NewOpenAIClient` undefined.
 
-- [ ] **Step 3: Implement AIClient**
+- [ ] **Step 4: Implement AIClient using official openai-go SDK**
 
 Create `backend/internal/crawler/ai_client.go`:
 
@@ -1472,13 +1501,13 @@ Create `backend/internal/crawler/ai_client.go`:
 package crawler
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
+
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
 )
 
 // AIClient is the interface for AI-powered product extraction.
@@ -1491,27 +1520,30 @@ type AIClient interface {
 	ExtractLinks(ctx context.Context, html string, baseURL string) ([]string, int, error)
 }
 
-// OpenAIClient implements AIClient using the OpenAI Chat Completions API.
+// OpenAIClient implements AIClient using the official OpenAI Go SDK.
 type OpenAIClient struct {
-	apiKey  string
-	baseURL string
-	client  *http.Client
-	model   string
+	client *openai.Client
+	model  string
 }
 
-// NewOpenAIClient creates an OpenAI client. baseURL is the API endpoint
-// (use "https://api.openai.com" for production, or a test server URL for testing).
-func NewOpenAIClient(apiKey string, baseURL string) *OpenAIClient {
+// NewOpenAIClient creates an OpenAI client using the official SDK.
+// model is the model name (e.g. "gpt-5-mini").
+// baseURL is optional - pass "" for production, or a test server URL for testing.
+func NewOpenAIClient(apiKey string, model string, baseURL string) *OpenAIClient {
+	opts := []option.RequestOption{
+		option.WithAPIKey(apiKey),
+	}
+	if baseURL != "" {
+		opts = append(opts, option.WithBaseURL(baseURL))
+	}
+
 	return &OpenAIClient{
-		apiKey:  apiKey,
-		baseURL: strings.TrimRight(baseURL, "/"),
-		client:  &http.Client{},
-		model:   "gpt-5-mini",
+		client: openai.NewClient(opts...),
+		model:  model,
 	}
 }
 
 func (c *OpenAIClient) ExtractProducts(ctx context.Context, html string, pageURL string) ([]RawProduct, int, error) {
-	// Truncate HTML to ~100k chars to stay within token limits
 	truncatedHTML := truncateHTML(html, 100000)
 
 	prompt := fmt.Sprintf(`You are a product data extractor. Analyze the following HTML from %s and extract product information.
@@ -1526,13 +1558,26 @@ Return ONLY the JSON array, no other text. If no products are found, return an e
 HTML:
 %s`, pageURL, truncatedHTML)
 
-	content, tokensUsed, err := c.chatCompletion(ctx, prompt)
+	completion, err := c.client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
+		Messages: []openai.ChatCompletionMessageParamUnion{
+			openai.UserMessage(prompt),
+		},
+		Model:       c.model,
+		Temperature: openai.Float(0.1),
+	})
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, fmt.Errorf("OpenAI API error: %w", err)
 	}
 
+	tokensUsed := int(completion.Usage.TotalTokens)
+
+	if len(completion.Choices) == 0 {
+		return nil, tokensUsed, fmt.Errorf("no choices in API response")
+	}
+
+	content := completion.Choices[0].Message.Content
+
 	var products []RawProduct
-	// Try to parse the response as JSON
 	cleaned := cleanJSONResponse(content)
 	if err := json.Unmarshal([]byte(cleaned), &products); err != nil {
 		// AI returned invalid JSON - not an error, just no products
@@ -1560,10 +1605,24 @@ Return ONLY the JSON array, no other text. Return at most 20 links. If no releva
 HTML:
 %s`, baseURL, truncatedHTML)
 
-	content, tokensUsed, err := c.chatCompletion(ctx, prompt)
+	completion, err := c.client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
+		Messages: []openai.ChatCompletionMessageParamUnion{
+			openai.UserMessage(prompt),
+		},
+		Model:       c.model,
+		Temperature: openai.Float(0.1),
+	})
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, fmt.Errorf("OpenAI API error: %w", err)
 	}
+
+	tokensUsed := int(completion.Usage.TotalTokens)
+
+	if len(completion.Choices) == 0 {
+		return nil, tokensUsed, fmt.Errorf("no choices in API response")
+	}
+
+	content := completion.Choices[0].Message.Content
 
 	var links []string
 	cleaned := cleanJSONResponse(content)
@@ -1572,66 +1631,6 @@ HTML:
 	}
 
 	return links, tokensUsed, nil
-}
-
-// chatCompletion sends a request to the OpenAI Chat Completions API.
-func (c *OpenAIClient) chatCompletion(ctx context.Context, prompt string) (string, int, error) {
-	reqBody := map[string]interface{}{
-		"model": c.model,
-		"messages": []map[string]string{
-			{"role": "user", "content": prompt},
-		},
-		"temperature": 0.1,
-	}
-
-	jsonBody, err := json.Marshal(reqBody)
-	if err != nil {
-		return "", 0, fmt.Errorf("marshaling request: %w", err)
-	}
-
-	url := c.baseURL + "/v1/chat/completions"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(jsonBody))
-	if err != nil {
-		return "", 0, fmt.Errorf("creating request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return "", 0, fmt.Errorf("API request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", 0, fmt.Errorf("reading response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", 0, fmt.Errorf("OpenAI API error: HTTP %d: %s", resp.StatusCode, string(body))
-	}
-
-	var result struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-		Usage struct {
-			TotalTokens int `json:"total_tokens"`
-		} `json:"usage"`
-	}
-
-	if err := json.Unmarshal(body, &result); err != nil {
-		return "", 0, fmt.Errorf("parsing response: %w", err)
-	}
-
-	if len(result.Choices) == 0 {
-		return "", result.Usage.TotalTokens, fmt.Errorf("no choices in API response")
-	}
-
-	return result.Choices[0].Message.Content, result.Usage.TotalTokens, nil
 }
 
 // truncateHTML truncates HTML content to maxChars characters.
@@ -1646,7 +1645,6 @@ func truncateHTML(html string, maxChars int) string {
 func cleanJSONResponse(content string) string {
 	content = strings.TrimSpace(content)
 
-	// Remove ```json ... ``` wrapper
 	if strings.HasPrefix(content, "```json") {
 		content = strings.TrimPrefix(content, "```json")
 		content = strings.TrimSuffix(content, "```")
@@ -1661,16 +1659,18 @@ func cleanJSONResponse(content string) string {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+Note: The SDK provides `option.WithBaseURL` for testing, so tests use the same mock `httptest` server approach but through the SDK's built-in mechanism. The SDK also supports Structured Outputs via JSON schema, which could be used in the future for even more reliable product extraction - for now we keep the JSON-in-content approach for simplicity.
+
+- [ ] **Step 5: Run tests to verify they pass**
 
 Run: `cd backend && go test ./internal/crawler/ -v -run TestOpenAIClient -count=1`
 Expected: All 4 tests PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add -A
-git commit -m "feat(crawler): add AI client interface and OpenAI implementation"
+git commit -m "feat(crawler): add AI client interface and OpenAI SDK implementation"
 ```
 
 ---
@@ -1692,7 +1692,7 @@ Add to `backend/internal/store/crawl_store.go` (after the existing `Finish` meth
 
 ```go
 func (s *CrawlStore) UpdateLogPath(ctx context.Context, id uuid.UUID, logFilePath string) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.pool.Exec(ctx,
 		`UPDATE crawls SET log_file_path = $1 WHERE id = $2`,
 		logFilePath, id,
 	)
@@ -1709,7 +1709,6 @@ package crawler_test
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -1717,6 +1716,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jzy/howmuchyousay/internal/crawler"
 	"github.com/jzy/howmuchyousay/internal/store"
 	"github.com/stretchr/testify/assert"
@@ -1744,9 +1744,9 @@ func (m *mockAIClient) ExtractLinks(ctx context.Context, html string, baseURL st
 	return nil, 0, nil
 }
 
-// --- Test DB setup (same as store tests) ---
+// --- Test DB setup (same as store tests - consider extracting to internal/testutil/) ---
 
-func setupTestDB(t *testing.T) *sql.DB {
+func setupTestDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 
 	dbURL := os.Getenv("TEST_DATABASE_URL")
@@ -1754,25 +1754,24 @@ func setupTestDB(t *testing.T) *sql.DB {
 		dbURL = "postgres://hmys:hmys_test@localhost:5433/howmuchyousay_test?sslmode=disable"
 	}
 
-	db, err := store.ConnectDB(dbURL)
-	if err != nil {
-		t.Fatalf("Failed to connect to test database: %v", err)
+	if err := store.RunMigrations(dbURL, "../../migrations"); err != nil {
+		t.Fatalf("Failed to run migrations: %v", err)
 	}
 
-	if err := store.RunMigrations(db, "../../migrations"); err != nil {
-		db.Close()
-		t.Fatalf("Failed to run migrations: %v", err)
+	pool, err := store.ConnectDB(dbURL)
+	if err != nil {
+		t.Fatalf("Failed to connect to test database: %v", err)
 	}
 
 	t.Cleanup(func() {
 		tables := []string{"answers", "rounds", "players", "products", "crawls", "game_sessions", "shops"}
 		for _, table := range tables {
-			db.Exec("DELETE FROM " + table)
+			pool.Exec(context.Background(), "DELETE FROM "+table)
 		}
-		db.Close()
+		pool.Close()
 	})
 
-	return db
+	return pool
 }
 
 func TestCrawler_RunWithStructuredData(t *testing.T) {
@@ -1828,7 +1827,7 @@ func TestCrawler_RunWithStructuredData(t *testing.T) {
 	}))
 	defer server.Close()
 
-	db := setupTestDB(t)
+	pool := setupTestDB(t)
 	logDir := t.TempDir()
 
 	mockAI := &mockAIClient{
@@ -1841,9 +1840,9 @@ func TestCrawler_RunWithStructuredData(t *testing.T) {
 	c := crawler.New(
 		crawler.NewHTTPFetcher(5*time.Second),
 		mockAI,
-		store.NewShopStore(db),
-		store.NewCrawlStore(db),
-		store.NewProductStore(db),
+		store.NewShopStore(pool),
+		store.NewCrawlStore(pool),
+		store.NewProductStore(pool),
 		logDir,
 	)
 
@@ -1886,7 +1885,7 @@ func TestCrawler_RunWithAIFallback(t *testing.T) {
 	}))
 	defer server.Close()
 
-	db := setupTestDB(t)
+	pool := setupTestDB(t)
 	logDir := t.TempDir()
 
 	callCount := 0
@@ -1913,9 +1912,9 @@ func TestCrawler_RunWithAIFallback(t *testing.T) {
 	c := crawler.New(
 		crawler.NewHTTPFetcher(5*time.Second),
 		mockAI,
-		store.NewShopStore(db),
-		store.NewCrawlStore(db),
-		store.NewProductStore(db),
+		store.NewShopStore(pool),
+		store.NewCrawlStore(pool),
+		store.NewProductStore(pool),
 		logDir,
 	)
 
@@ -1947,7 +1946,7 @@ func TestCrawler_RunRespectsTimeout(t *testing.T) {
 	}))
 	defer server.Close()
 
-	db := setupTestDB(t)
+	pool := setupTestDB(t)
 	logDir := t.TempDir()
 
 	mockAI := &mockAIClient{
@@ -1959,9 +1958,9 @@ func TestCrawler_RunRespectsTimeout(t *testing.T) {
 	c := crawler.New(
 		crawler.NewHTTPFetcher(5*time.Second),
 		mockAI,
-		store.NewShopStore(db),
-		store.NewCrawlStore(db),
-		store.NewProductStore(db),
+		store.NewShopStore(pool),
+		store.NewCrawlStore(pool),
+		store.NewProductStore(pool),
 		logDir,
 	)
 
@@ -1996,14 +1995,14 @@ func TestCrawler_RunSavesToDatabase(t *testing.T) {
 	}))
 	defer server.Close()
 
-	db := setupTestDB(t)
+	pool := setupTestDB(t)
 	logDir := t.TempDir()
 
 	mockAI := &mockAIClient{}
 
-	shopStore := store.NewShopStore(db)
-	crawlStore := store.NewCrawlStore(db)
-	productStore := store.NewProductStore(db)
+	shopStore := store.NewShopStore(pool)
+	crawlStore := store.NewCrawlStore(pool)
+	productStore := store.NewProductStore(pool)
 
 	c := crawler.New(
 		crawler.NewHTTPFetcher(5*time.Second),
@@ -2453,32 +2452,32 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Warning: OPENAI_API_KEY not set. AI extraction will not be available.")
 	}
 
+	// Run migrations
+	if err := store.RunMigrations(cfg.DatabaseURL, findMigrationsPath()); err != nil {
+		log.Fatalf("Failed to run migrations: %v", err)
+	}
+
 	// Connect to database
-	db, err := store.ConnectDB(cfg.DatabaseURL)
+	pool, err := store.ConnectDB(cfg.DatabaseURL)
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
-	defer db.Close()
-
-	// Run migrations
-	if err := store.RunMigrations(db, findMigrationsPath()); err != nil {
-		log.Fatalf("Failed to run migrations: %v", err)
-	}
+	defer pool.Close()
 
 	// Create components
 	fetcher := crawler.NewHTTPFetcher(*timeoutFlag)
 
 	var aiClient crawler.AIClient
 	if cfg.OpenAIAPIKey != "" {
-		aiClient = crawler.NewOpenAIClient(cfg.OpenAIAPIKey, "https://api.openai.com")
+		aiClient = crawler.NewOpenAIClient(cfg.OpenAIAPIKey, cfg.OpenAIModel, "")
 	}
 
 	c := crawler.New(
 		fetcher,
 		aiClient,
-		store.NewShopStore(db),
-		store.NewCrawlStore(db),
-		store.NewProductStore(db),
+		store.NewShopStore(pool),
+		store.NewCrawlStore(pool),
+		store.NewProductStore(pool),
 		cfg.LogDir,
 	)
 

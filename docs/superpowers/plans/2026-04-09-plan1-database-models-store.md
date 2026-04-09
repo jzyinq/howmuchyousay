@@ -4,9 +4,9 @@
 
 **Goal:** Set up the Go backend project skeleton, PostgreSQL schema, Go models, and store (repository) layer with full test coverage.
 
-**Architecture:** Standard Go project layout with `cmd/` for entry points, `internal/` for private packages. Store layer uses `database/sql` with `pgx` driver directly (no ORM). Migrations managed by `golang-migrate`. Tests run against a real PostgreSQL instance via docker-compose.
+**Architecture:** Standard Go project layout with `cmd/` for entry points, `internal/` for private packages. Store layer uses pgx v5 native interface with `pgxpool` (no ORM, no `database/sql` abstraction). Migrations managed by `golang-migrate` with pgx/v5 driver. Tests run against a real PostgreSQL instance via docker-compose.
 
-**Tech Stack:** Go 1.23+, PostgreSQL 16, pgx v5, golang-migrate, testify, docker-compose
+**Tech Stack:** Go 1.23+, PostgreSQL 16, pgx v5 (native, pgxpool), golang-migrate (pgx/v5 driver), testify, docker-compose
 
 **Plan sequence:** This is Plan 1 of 5:
 1. **Database, Models & Store Layer** (this plan)
@@ -156,6 +156,7 @@ Create `.env.example`:
 DATABASE_URL=postgres://hmys:hmys_dev@localhost:5432/howmuchyousay?sslmode=disable
 TEST_DATABASE_URL=postgres://hmys:hmys_test@localhost:5433/howmuchyousay_test?sslmode=disable
 OPENAI_API_KEY=sk-your-key-here
+OPENAI_MODEL=gpt-5-mini
 LOG_DIR=./logs
 ```
 
@@ -220,9 +221,9 @@ pgdata/
 
 ```bash
 cd backend && go get github.com/jackc/pgx/v5
-cd backend && go get github.com/jackc/pgx/v5/stdlib
+cd backend && go get github.com/jackc/pgx/v5/pgxpool
 cd backend && go get github.com/golang-migrate/migrate/v4
-cd backend && go get github.com/golang-migrate/migrate/v4/database/postgres
+cd backend && go get github.com/golang-migrate/migrate/v4/database/pgx/v5
 cd backend && go get github.com/golang-migrate/migrate/v4/source/file
 cd backend && go get github.com/google/uuid
 cd backend && go get github.com/stretchr/testify
@@ -256,6 +257,7 @@ import (
 type Config struct {
 	DatabaseURL  string
 	OpenAIAPIKey string
+	OpenAIModel  string
 	LogDir       string
 	ServerPort   string
 }
@@ -264,6 +266,7 @@ func Load() *Config {
 	return &Config{
 		DatabaseURL:  getEnv("DATABASE_URL", "postgres://hmys:hmys_dev@localhost:5432/howmuchyousay?sslmode=disable"),
 		OpenAIAPIKey: getEnv("OPENAI_API_KEY", ""),
+		OpenAIModel:  getEnv("OPENAI_MODEL", "gpt-5-mini"),
 		LogDir:       getEnv("LOG_DIR", "./logs"),
 		ServerPort:   getEnv("SERVER_PORT", "8080"),
 	}
@@ -544,10 +547,8 @@ git commit -m "feat: add all domain models (shop, crawl, product, game, player, 
 Create `backend/migrations/001_create_shops.up.sql`:
 
 ```sql
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-
 CREATE TABLE shops (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     url TEXT NOT NULL UNIQUE,
     name TEXT,
     first_crawled_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -572,7 +573,7 @@ CREATE TYPE game_mode AS ENUM ('comparison', 'guess');
 CREATE TYPE game_status AS ENUM ('crawling', 'ready', 'lobby', 'in_progress', 'finished');
 
 CREATE TABLE game_sessions (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     room_code VARCHAR(6),
     host_nick VARCHAR(50) NOT NULL,
     shop_id UUID NOT NULL REFERENCES shops(id),
@@ -604,7 +605,7 @@ Create `backend/migrations/003_create_crawls.up.sql`:
 CREATE TYPE crawl_status AS ENUM ('pending', 'in_progress', 'completed', 'failed');
 
 CREATE TABLE crawls (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     shop_id UUID NOT NULL REFERENCES shops(id),
     session_id UUID REFERENCES game_sessions(id),
     status crawl_status NOT NULL DEFAULT 'pending',
@@ -635,7 +636,7 @@ Create `backend/migrations/004_create_products.up.sql`:
 
 ```sql
 CREATE TABLE products (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     shop_id UUID NOT NULL REFERENCES shops(id),
     crawl_id UUID NOT NULL REFERENCES crawls(id),
     name TEXT NOT NULL,
@@ -661,7 +662,7 @@ Create `backend/migrations/005_create_players.up.sql`:
 
 ```sql
 CREATE TABLE players (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     session_id UUID NOT NULL REFERENCES game_sessions(id),
     nick VARCHAR(50) NOT NULL,
     joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -685,7 +686,7 @@ Create `backend/migrations/006_create_rounds.up.sql`:
 CREATE TYPE round_type AS ENUM ('comparison', 'guess');
 
 CREATE TABLE rounds (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     session_id UUID NOT NULL REFERENCES game_sessions(id),
     round_number INT NOT NULL,
     round_type round_type NOT NULL,
@@ -712,7 +713,7 @@ Create `backend/migrations/007_create_answers.up.sql`:
 
 ```sql
 CREATE TABLE answers (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     round_id UUID NOT NULL REFERENCES rounds(id),
     player_id UUID NOT NULL REFERENCES players(id),
     answer TEXT NOT NULL,
@@ -756,51 +757,53 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/golang-migrate/migrate/v4"
-	"github.com/golang-migrate/migrate/v4/database/postgres"
+	_ "github.com/golang-migrate/migrate/v4/database/pgx/v5"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func ConnectDB(databaseURL string) (*sql.DB, error) {
-	db, err := sql.Open("pgx", databaseURL)
-	if err != nil {
-		return nil, fmt.Errorf("opening database: %w", err)
-	}
-
-	db.SetMaxOpenConns(25)
-	db.SetMaxIdleConns(5)
-	db.SetConnMaxLifetime(5 * time.Minute)
-
+func ConnectDB(databaseURL string) (*pgxpool.Pool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if err := db.PingContext(ctx); err != nil {
-		db.Close()
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("parsing database URL: %w", err)
+	}
+
+	config.MaxConns = 25
+	config.MinConns = 5
+
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		return nil, fmt.Errorf("creating connection pool: %w", err)
+	}
+
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
 		return nil, fmt.Errorf("pinging database: %w", err)
 	}
 
-	return db, nil
+	return pool, nil
 }
 
-func RunMigrations(db *sql.DB, migrationsPath string) error {
-	driver, err := postgres.WithInstance(db, &postgres.Config{})
-	if err != nil {
-		return fmt.Errorf("creating migration driver: %w", err)
-	}
+func RunMigrations(databaseURL string, migrationsPath string) error {
+	// golang-migrate pgx/v5 driver uses "pgx5://" scheme
+	migrateURL := strings.Replace(databaseURL, "postgres://", "pgx5://", 1)
 
-	m, err := migrate.NewWithDatabaseInstance(
+	m, err := migrate.New(
 		"file://"+migrationsPath,
-		"postgres",
-		driver,
+		migrateURL,
 	)
 	if err != nil {
 		return fmt.Errorf("creating migrator: %w", err)
 	}
+	defer m.Close()
 
 	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
 		return fmt.Errorf("running migrations: %w", err)
@@ -829,15 +832,15 @@ import (
 func main() {
 	cfg := config.Load()
 
-	db, err := store.ConnectDB(cfg.DatabaseURL)
+	if err := store.RunMigrations(cfg.DatabaseURL, "../migrations"); err != nil {
+		log.Fatalf("Failed to run migrations: %v", err)
+	}
+
+	pool, err := store.ConnectDB(cfg.DatabaseURL)
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
-	defer db.Close()
-
-	if err := store.RunMigrations(db, "../migrations"); err != nil {
-		log.Fatalf("Failed to run migrations: %v", err)
-	}
+	defer pool.Close()
 
 	fmt.Printf("Server ready on port %s\n", cfg.ServerPort)
 	os.Exit(0)
@@ -885,17 +888,17 @@ package store_test
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"os"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jzy/howmuchyousay/internal/models"
 	"github.com/jzy/howmuchyousay/internal/store"
 	"github.com/stretchr/testify/require"
 )
 
-func setupTestDB(t *testing.T) *sql.DB {
+func setupTestDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 
 	dbURL := os.Getenv("TEST_DATABASE_URL")
@@ -903,30 +906,29 @@ func setupTestDB(t *testing.T) *sql.DB {
 		dbURL = "postgres://hmys:hmys_test@localhost:5433/howmuchyousay_test?sslmode=disable"
 	}
 
-	db, err := store.ConnectDB(dbURL)
+	if err := store.RunMigrations(dbURL, "../../migrations"); err != nil {
+		t.Fatalf("Failed to run migrations on test database: %v", err)
+	}
+
+	pool, err := store.ConnectDB(dbURL)
 	if err != nil {
 		t.Fatalf("Failed to connect to test database: %v", err)
 	}
 
-	if err := store.RunMigrations(db, "../../migrations"); err != nil {
-		db.Close()
-		t.Fatalf("Failed to run migrations on test database: %v", err)
-	}
-
 	t.Cleanup(func() {
-		cleanupTestDB(t, db)
-		db.Close()
+		cleanupTestDB(t, pool)
+		pool.Close()
 	})
 
-	return db
+	return pool
 }
 
-func cleanupTestDB(t *testing.T, db *sql.DB) {
+func cleanupTestDB(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 
 	tables := []string{"answers", "rounds", "players", "products", "crawls", "game_sessions", "shops"}
 	for _, table := range tables {
-		_, err := db.Exec("DELETE FROM " + table)
+		_, err := pool.Exec(context.Background(), "DELETE FROM "+table)
 		if err != nil {
 			t.Logf("Warning: failed to clean table %s: %v", table, err)
 		}
@@ -934,46 +936,46 @@ func cleanupTestDB(t *testing.T, db *sql.DB) {
 }
 
 // createTestShop creates a shop for testing purposes.
-func createTestShop(t *testing.T, db *sql.DB, url string) *models.Shop {
+func createTestShop(t *testing.T, pool *pgxpool.Pool, url string) *models.Shop {
 	t.Helper()
 	ctx := context.Background()
-	shopStore := store.NewShopStore(db)
+	shopStore := store.NewShopStore(pool)
 	shop, err := shopStore.Create(ctx, url)
 	require.NoError(t, err)
 	return shop
 }
 
 // createTestShopAndCrawl creates a shop and a crawl (no session) for testing.
-func createTestShopAndCrawl(t *testing.T, db *sql.DB, url string) (*models.Shop, *models.Crawl) {
+func createTestShopAndCrawl(t *testing.T, pool *pgxpool.Pool, url string) (*models.Shop, *models.Crawl) {
 	t.Helper()
 	ctx := context.Background()
-	shop := createTestShop(t, db, url)
-	crawlStore := store.NewCrawlStore(db)
+	shop := createTestShop(t, pool, url)
+	crawlStore := store.NewCrawlStore(pool)
 	crawl, err := crawlStore.Create(ctx, shop.ID, nil, "/tmp/test.log")
 	require.NoError(t, err)
 	return shop, crawl
 }
 
 // createTestSession creates a shop and a game session for testing.
-func createTestSession(t *testing.T, db *sql.DB, shopURL string) (*models.Shop, *models.GameSession) {
+func createTestSession(t *testing.T, pool *pgxpool.Pool, shopURL string) (*models.Shop, *models.GameSession) {
 	t.Helper()
 	ctx := context.Background()
-	shop := createTestShop(t, db, shopURL)
-	gameStore := store.NewGameStore(db)
+	shop := createTestShop(t, pool, shopURL)
+	gameStore := store.NewGameStore(pool)
 	session, err := gameStore.Create(ctx, shop.ID, "TestHost", models.GameModeComparison, 10)
 	require.NoError(t, err)
 	return shop, session
 }
 
 // createTestProducts creates a shop, session, crawl, and N products for testing.
-func createTestProducts(t *testing.T, db *sql.DB, shopURL string, count int) (*models.Shop, *models.GameSession, []models.Product) {
+func createTestProducts(t *testing.T, pool *pgxpool.Pool, shopURL string, count int) (*models.Shop, *models.GameSession, []models.Product) {
 	t.Helper()
 	ctx := context.Background()
-	shop, session := createTestSession(t, db, shopURL)
-	crawlStore := store.NewCrawlStore(db)
+	shop, session := createTestSession(t, pool, shopURL)
+	crawlStore := store.NewCrawlStore(pool)
 	crawl, err := crawlStore.Create(ctx, shop.ID, nil, "/tmp/test.log")
 	require.NoError(t, err)
-	productStore := store.NewProductStore(db)
+	productStore := store.NewProductStore(pool)
 	var products []models.Product
 	for i := 0; i < count; i++ {
 		p, err := productStore.Create(ctx, shop.ID, crawl.ID,
@@ -985,15 +987,15 @@ func createTestProducts(t *testing.T, db *sql.DB, shopURL string, count int) (*m
 }
 
 // createTestRound creates a full setup: shop, session, 2 products, 1 comparison round, 1 player.
-func createTestRound(t *testing.T, db *sql.DB, shopURL string) (*models.GameSession, *models.Round, *models.Player) {
+func createTestRound(t *testing.T, pool *pgxpool.Pool, shopURL string) (*models.GameSession, *models.Round, *models.Player) {
 	t.Helper()
 	ctx := context.Background()
-	_, session, products := createTestProducts(t, db, shopURL, 2)
+	_, session, products := createTestProducts(t, pool, shopURL, 2)
 	productBID := products[1].ID
-	roundStore := store.NewRoundStore(db)
+	roundStore := store.NewRoundStore(pool)
 	round, err := roundStore.Create(ctx, session.ID, 1, models.RoundTypeComparison, products[0].ID, &productBID, "b", 2)
 	require.NoError(t, err)
-	playerStore := store.NewPlayerStore(db)
+	playerStore := store.NewPlayerStore(pool)
 	player, err := playerStore.Create(ctx, session.ID, "TestPlayer", true)
 	require.NoError(t, err)
 	return session, round, player
@@ -1042,8 +1044,8 @@ import (
 )
 
 func TestShopStore_Create(t *testing.T) {
-	db := setupTestDB(t)
-	s := store.NewShopStore(db)
+	pool := setupTestDB(t)
+	s := store.NewShopStore(pool)
 	ctx := context.Background()
 
 	shop, err := s.Create(ctx, "https://mediaexpert.pl")
@@ -1054,8 +1056,8 @@ func TestShopStore_Create(t *testing.T) {
 }
 
 func TestShopStore_GetByURL(t *testing.T) {
-	db := setupTestDB(t)
-	s := store.NewShopStore(db)
+	pool := setupTestDB(t)
+	s := store.NewShopStore(pool)
 	ctx := context.Background()
 
 	created, err := s.Create(ctx, "https://rossmann.pl")
@@ -1068,8 +1070,8 @@ func TestShopStore_GetByURL(t *testing.T) {
 }
 
 func TestShopStore_GetByURL_NotFound(t *testing.T) {
-	db := setupTestDB(t)
-	s := store.NewShopStore(db)
+	pool := setupTestDB(t)
+	s := store.NewShopStore(pool)
 	ctx := context.Background()
 
 	found, err := s.GetByURL(ctx, "https://nonexistent.pl")
@@ -1078,8 +1080,8 @@ func TestShopStore_GetByURL_NotFound(t *testing.T) {
 }
 
 func TestShopStore_GetByID(t *testing.T) {
-	db := setupTestDB(t)
-	s := store.NewShopStore(db)
+	pool := setupTestDB(t)
+	s := store.NewShopStore(pool)
 	ctx := context.Background()
 
 	created, err := s.Create(ctx, "https://allegro.pl")
@@ -1092,8 +1094,8 @@ func TestShopStore_GetByID(t *testing.T) {
 }
 
 func TestShopStore_UpdateLastCrawled(t *testing.T) {
-	db := setupTestDB(t)
-	s := store.NewShopStore(db)
+	pool := setupTestDB(t)
+	s := store.NewShopStore(pool)
 	ctx := context.Background()
 
 	shop, err := s.Create(ctx, "https://empik.com")
@@ -1122,23 +1124,25 @@ package store
 
 import (
 	"context"
-	"database/sql"
+	"errors"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jzy/howmuchyousay/internal/models"
 )
 
 type ShopStore struct {
-	db *sql.DB
+	pool *pgxpool.Pool
 }
 
-func NewShopStore(db *sql.DB) *ShopStore {
-	return &ShopStore{db: db}
+func NewShopStore(pool *pgxpool.Pool) *ShopStore {
+	return &ShopStore{pool: pool}
 }
 
 func (s *ShopStore) Create(ctx context.Context, url string) (*models.Shop, error) {
 	shop := &models.Shop{}
-	err := s.db.QueryRowContext(ctx,
+	err := s.pool.QueryRow(ctx,
 		`INSERT INTO shops (url) VALUES ($1)
 		 RETURNING id, url, name, first_crawled_at, last_crawled_at`,
 		url,
@@ -1151,11 +1155,11 @@ func (s *ShopStore) Create(ctx context.Context, url string) (*models.Shop, error
 
 func (s *ShopStore) GetByURL(ctx context.Context, url string) (*models.Shop, error) {
 	shop := &models.Shop{}
-	err := s.db.QueryRowContext(ctx,
+	err := s.pool.QueryRow(ctx,
 		`SELECT id, url, name, first_crawled_at, last_crawled_at FROM shops WHERE url = $1`,
 		url,
 	).Scan(&shop.ID, &shop.URL, &shop.Name, &shop.FirstCrawledAt, &shop.LastCrawledAt)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -1166,11 +1170,11 @@ func (s *ShopStore) GetByURL(ctx context.Context, url string) (*models.Shop, err
 
 func (s *ShopStore) GetByID(ctx context.Context, id uuid.UUID) (*models.Shop, error) {
 	shop := &models.Shop{}
-	err := s.db.QueryRowContext(ctx,
+	err := s.pool.QueryRow(ctx,
 		`SELECT id, url, name, first_crawled_at, last_crawled_at FROM shops WHERE id = $1`,
 		id,
 	).Scan(&shop.ID, &shop.URL, &shop.Name, &shop.FirstCrawledAt, &shop.LastCrawledAt)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -1180,7 +1184,7 @@ func (s *ShopStore) GetByID(ctx context.Context, id uuid.UUID) (*models.Shop, er
 }
 
 func (s *ShopStore) UpdateLastCrawled(ctx context.Context, id uuid.UUID) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.pool.Exec(ctx,
 		`UPDATE shops SET last_crawled_at = NOW() WHERE id = $1`,
 		id,
 	)
@@ -1226,9 +1230,9 @@ import (
 )
 
 func TestCrawlStore_Create(t *testing.T) {
-	db := setupTestDB(t)
-	shopStore := store.NewShopStore(db)
-	crawlStore := store.NewCrawlStore(db)
+	pool := setupTestDB(t)
+	shopStore := store.NewShopStore(pool)
+	crawlStore := store.NewCrawlStore(pool)
 	ctx := context.Background()
 
 	shop, err := shopStore.Create(ctx, "https://mediaexpert.pl")
@@ -1244,9 +1248,9 @@ func TestCrawlStore_Create(t *testing.T) {
 }
 
 func TestCrawlStore_UpdateStatus(t *testing.T) {
-	db := setupTestDB(t)
-	shopStore := store.NewShopStore(db)
-	crawlStore := store.NewCrawlStore(db)
+	pool := setupTestDB(t)
+	shopStore := store.NewShopStore(pool)
+	crawlStore := store.NewCrawlStore(pool)
 	ctx := context.Background()
 
 	shop, err := shopStore.Create(ctx, "https://example.com")
@@ -1264,9 +1268,9 @@ func TestCrawlStore_UpdateStatus(t *testing.T) {
 }
 
 func TestCrawlStore_Finish(t *testing.T) {
-	db := setupTestDB(t)
-	shopStore := store.NewShopStore(db)
-	crawlStore := store.NewCrawlStore(db)
+	pool := setupTestDB(t)
+	shopStore := store.NewShopStore(pool)
+	crawlStore := store.NewCrawlStore(pool)
 	ctx := context.Background()
 
 	shop, err := shopStore.Create(ctx, "https://finish-test.com")
@@ -1290,9 +1294,9 @@ func TestCrawlStore_Finish(t *testing.T) {
 }
 
 func TestCrawlStore_FinishWithError(t *testing.T) {
-	db := setupTestDB(t)
-	shopStore := store.NewShopStore(db)
-	crawlStore := store.NewCrawlStore(db)
+	pool := setupTestDB(t)
+	shopStore := store.NewShopStore(pool)
+	crawlStore := store.NewCrawlStore(pool)
 	ctx := context.Background()
 
 	shop, err := shopStore.Create(ctx, "https://error-test.com")
@@ -1327,23 +1331,25 @@ package store
 
 import (
 	"context"
-	"database/sql"
+	"errors"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jzy/howmuchyousay/internal/models"
 )
 
 type CrawlStore struct {
-	db *sql.DB
+	pool *pgxpool.Pool
 }
 
-func NewCrawlStore(db *sql.DB) *CrawlStore {
-	return &CrawlStore{db: db}
+func NewCrawlStore(pool *pgxpool.Pool) *CrawlStore {
+	return &CrawlStore{pool: pool}
 }
 
 func (s *CrawlStore) Create(ctx context.Context, shopID uuid.UUID, sessionID *uuid.UUID, logFilePath string) (*models.Crawl, error) {
 	crawl := &models.Crawl{}
-	err := s.db.QueryRowContext(ctx,
+	err := s.pool.QueryRow(ctx,
 		`INSERT INTO crawls (shop_id, session_id, log_file_path)
 		 VALUES ($1, $2, $3)
 		 RETURNING id, shop_id, session_id, status, products_found, pages_visited,
@@ -1363,7 +1369,7 @@ func (s *CrawlStore) Create(ctx context.Context, shopID uuid.UUID, sessionID *uu
 
 func (s *CrawlStore) GetByID(ctx context.Context, id uuid.UUID) (*models.Crawl, error) {
 	crawl := &models.Crawl{}
-	err := s.db.QueryRowContext(ctx,
+	err := s.pool.QueryRow(ctx,
 		`SELECT id, shop_id, session_id, status, products_found, pages_visited,
 		        ai_requests_count, error_message, log_file_path, started_at, finished_at, duration_ms
 		 FROM crawls WHERE id = $1`,
@@ -1374,7 +1380,7 @@ func (s *CrawlStore) GetByID(ctx context.Context, id uuid.UUID) (*models.Crawl, 
 		&crawl.ErrorMessage, &crawl.LogFilePath, &crawl.StartedAt,
 		&crawl.FinishedAt, &crawl.DurationMs,
 	)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -1384,7 +1390,7 @@ func (s *CrawlStore) GetByID(ctx context.Context, id uuid.UUID) (*models.Crawl, 
 }
 
 func (s *CrawlStore) UpdateStatus(ctx context.Context, id uuid.UUID, status models.CrawlStatus) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.pool.Exec(ctx,
 		`UPDATE crawls SET status = $1 WHERE id = $2`,
 		status, id,
 	)
@@ -1392,7 +1398,7 @@ func (s *CrawlStore) UpdateStatus(ctx context.Context, id uuid.UUID, status mode
 }
 
 func (s *CrawlStore) Finish(ctx context.Context, id uuid.UUID, status models.CrawlStatus, productsFound, pagesVisited, aiRequests int, errorMessage *string) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.pool.Exec(ctx,
 		`UPDATE crawls SET
 			status = $1,
 			products_found = $2,
@@ -1446,8 +1452,8 @@ import (
 )
 
 func TestProductStore_Create(t *testing.T) {
-	db := setupTestDB(t)
-	productStore := store.NewProductStore(db)
+	pool := setupTestDB(t)
+	productStore := store.NewProductStore(pool)
 	ctx := context.Background()
 
 	shop, crawl := createTestShopAndCrawl(t, db, "https://product-test.com")
@@ -1461,8 +1467,8 @@ func TestProductStore_Create(t *testing.T) {
 }
 
 func TestProductStore_GetByShopID(t *testing.T) {
-	db := setupTestDB(t)
-	productStore := store.NewProductStore(db)
+	pool := setupTestDB(t)
+	productStore := store.NewProductStore(pool)
 	ctx := context.Background()
 
 	shop, crawl := createTestShopAndCrawl(t, db, "https://list-test.com")
@@ -1480,8 +1486,8 @@ func TestProductStore_GetByShopID(t *testing.T) {
 }
 
 func TestProductStore_CountByShopID(t *testing.T) {
-	db := setupTestDB(t)
-	productStore := store.NewProductStore(db)
+	pool := setupTestDB(t)
+	productStore := store.NewProductStore(pool)
 	ctx := context.Background()
 
 	shop, crawl := createTestShopAndCrawl(t, db, "https://count-test.com")
@@ -1497,8 +1503,8 @@ func TestProductStore_CountByShopID(t *testing.T) {
 }
 
 func TestProductStore_GetRandomByShopID(t *testing.T) {
-	db := setupTestDB(t)
-	productStore := store.NewProductStore(db)
+	pool := setupTestDB(t)
+	productStore := store.NewProductStore(pool)
 	ctx := context.Background()
 
 	shop, crawl := createTestShopAndCrawl(t, db, "https://random-test.com")
@@ -1528,23 +1534,25 @@ package store
 
 import (
 	"context"
-	"database/sql"
+	"errors"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jzy/howmuchyousay/internal/models"
 )
 
 type ProductStore struct {
-	db *sql.DB
+	pool *pgxpool.Pool
 }
 
-func NewProductStore(db *sql.DB) *ProductStore {
-	return &ProductStore{db: db}
+func NewProductStore(pool *pgxpool.Pool) *ProductStore {
+	return &ProductStore{pool: pool}
 }
 
 func (s *ProductStore) Create(ctx context.Context, shopID, crawlID uuid.UUID, name string, price float64, imageURL, sourceURL string) (*models.Product, error) {
 	product := &models.Product{}
-	err := s.db.QueryRowContext(ctx,
+	err := s.pool.QueryRow(ctx,
 		`INSERT INTO products (shop_id, crawl_id, name, price, image_url, source_url)
 		 VALUES ($1, $2, $3, $4, $5, $6)
 		 RETURNING id, shop_id, crawl_id, name, price, image_url, source_url, created_at`,
@@ -1558,7 +1566,7 @@ func (s *ProductStore) Create(ctx context.Context, shopID, crawlID uuid.UUID, na
 }
 
 func (s *ProductStore) GetByShopID(ctx context.Context, shopID uuid.UUID) ([]models.Product, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.pool.Query(ctx,
 		`SELECT id, shop_id, crawl_id, name, price, image_url, source_url, created_at
 		 FROM products WHERE shop_id = $1
 		 ORDER BY created_at DESC`,
@@ -1583,7 +1591,7 @@ func (s *ProductStore) GetByShopID(ctx context.Context, shopID uuid.UUID) ([]mod
 
 func (s *ProductStore) CountByShopID(ctx context.Context, shopID uuid.UUID) (int, error) {
 	var count int
-	err := s.db.QueryRowContext(ctx,
+	err := s.pool.QueryRow(ctx,
 		`SELECT COUNT(*) FROM products WHERE shop_id = $1`,
 		shopID,
 	).Scan(&count)
@@ -1591,7 +1599,7 @@ func (s *ProductStore) CountByShopID(ctx context.Context, shopID uuid.UUID) (int
 }
 
 func (s *ProductStore) GetRandomByShopID(ctx context.Context, shopID uuid.UUID, limit int) ([]models.Product, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.pool.Query(ctx,
 		`SELECT id, shop_id, crawl_id, name, price, image_url, source_url, created_at
 		 FROM products WHERE shop_id = $1
 		 ORDER BY RANDOM()
@@ -1654,8 +1662,8 @@ import (
 )
 
 func TestGameStore_Create(t *testing.T) {
-	db := setupTestDB(t)
-	gameStore := store.NewGameStore(db)
+	pool := setupTestDB(t)
+	gameStore := store.NewGameStore(pool)
 	ctx := context.Background()
 
 	shop := createTestShop(t, db, "https://game-test.com")
@@ -1671,8 +1679,8 @@ func TestGameStore_Create(t *testing.T) {
 }
 
 func TestGameStore_CreateWithRoomCode(t *testing.T) {
-	db := setupTestDB(t)
-	gameStore := store.NewGameStore(db)
+	pool := setupTestDB(t)
+	gameStore := store.NewGameStore(pool)
 	ctx := context.Background()
 
 	shop := createTestShop(t, db, "https://room-test.com")
@@ -1685,8 +1693,8 @@ func TestGameStore_CreateWithRoomCode(t *testing.T) {
 }
 
 func TestGameStore_GetByID(t *testing.T) {
-	db := setupTestDB(t)
-	gameStore := store.NewGameStore(db)
+	pool := setupTestDB(t)
+	gameStore := store.NewGameStore(pool)
 	ctx := context.Background()
 
 	shop := createTestShop(t, db, "https://getbyid-test.com")
@@ -1701,8 +1709,8 @@ func TestGameStore_GetByID(t *testing.T) {
 }
 
 func TestGameStore_GetByRoomCode(t *testing.T) {
-	db := setupTestDB(t)
-	gameStore := store.NewGameStore(db)
+	pool := setupTestDB(t)
+	gameStore := store.NewGameStore(pool)
 	ctx := context.Background()
 
 	shop := createTestShop(t, db, "https://roomcode-test.com")
@@ -1717,8 +1725,8 @@ func TestGameStore_GetByRoomCode(t *testing.T) {
 }
 
 func TestGameStore_UpdateStatus(t *testing.T) {
-	db := setupTestDB(t)
-	gameStore := store.NewGameStore(db)
+	pool := setupTestDB(t)
+	gameStore := store.NewGameStore(pool)
 	ctx := context.Background()
 
 	shop := createTestShop(t, db, "https://status-test.com")
@@ -1735,9 +1743,9 @@ func TestGameStore_UpdateStatus(t *testing.T) {
 }
 
 func TestGameStore_SetCrawlID(t *testing.T) {
-	db := setupTestDB(t)
-	gameStore := store.NewGameStore(db)
-	crawlStore := store.NewCrawlStore(db)
+	pool := setupTestDB(t)
+	gameStore := store.NewGameStore(pool)
+	crawlStore := store.NewCrawlStore(pool)
 	ctx := context.Background()
 
 	shop := createTestShop(t, db, "https://setcrawl-test.com")
@@ -1772,23 +1780,25 @@ package store
 
 import (
 	"context"
-	"database/sql"
+	"errors"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jzy/howmuchyousay/internal/models"
 )
 
 type GameStore struct {
-	db *sql.DB
+	pool *pgxpool.Pool
 }
 
-func NewGameStore(db *sql.DB) *GameStore {
-	return &GameStore{db: db}
+func NewGameStore(pool *pgxpool.Pool) *GameStore {
+	return &GameStore{pool: pool}
 }
 
 func (s *GameStore) Create(ctx context.Context, shopID uuid.UUID, hostNick string, mode models.GameMode, roundsTotal int) (*models.GameSession, error) {
 	session := &models.GameSession{}
-	err := s.db.QueryRowContext(ctx,
+	err := s.pool.QueryRow(ctx,
 		`INSERT INTO game_sessions (shop_id, host_nick, game_mode, rounds_total)
 		 VALUES ($1, $2, $3, $4)
 		 RETURNING id, room_code, host_nick, shop_id, game_mode, rounds_total, status, crawl_id, created_at, updated_at`,
@@ -1804,7 +1814,7 @@ func (s *GameStore) Create(ctx context.Context, shopID uuid.UUID, hostNick strin
 
 func (s *GameStore) CreateWithRoom(ctx context.Context, shopID uuid.UUID, hostNick string, mode models.GameMode, roundsTotal int, roomCode string) (*models.GameSession, error) {
 	session := &models.GameSession{}
-	err := s.db.QueryRowContext(ctx,
+	err := s.pool.QueryRow(ctx,
 		`INSERT INTO game_sessions (shop_id, host_nick, game_mode, rounds_total, room_code, status)
 		 VALUES ($1, $2, $3, $4, $5, 'lobby')
 		 RETURNING id, room_code, host_nick, shop_id, game_mode, rounds_total, status, crawl_id, created_at, updated_at`,
@@ -1820,14 +1830,14 @@ func (s *GameStore) CreateWithRoom(ctx context.Context, shopID uuid.UUID, hostNi
 
 func (s *GameStore) GetByID(ctx context.Context, id uuid.UUID) (*models.GameSession, error) {
 	session := &models.GameSession{}
-	err := s.db.QueryRowContext(ctx,
+	err := s.pool.QueryRow(ctx,
 		`SELECT id, room_code, host_nick, shop_id, game_mode, rounds_total, status, crawl_id, created_at, updated_at
 		 FROM game_sessions WHERE id = $1`,
 		id,
 	).Scan(&session.ID, &session.RoomCode, &session.HostNick, &session.ShopID,
 		&session.GameMode, &session.RoundsTotal, &session.Status, &session.CrawlID,
 		&session.CreatedAt, &session.UpdatedAt)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -1838,14 +1848,14 @@ func (s *GameStore) GetByID(ctx context.Context, id uuid.UUID) (*models.GameSess
 
 func (s *GameStore) GetByRoomCode(ctx context.Context, code string) (*models.GameSession, error) {
 	session := &models.GameSession{}
-	err := s.db.QueryRowContext(ctx,
+	err := s.pool.QueryRow(ctx,
 		`SELECT id, room_code, host_nick, shop_id, game_mode, rounds_total, status, crawl_id, created_at, updated_at
 		 FROM game_sessions WHERE room_code = $1`,
 		code,
 	).Scan(&session.ID, &session.RoomCode, &session.HostNick, &session.ShopID,
 		&session.GameMode, &session.RoundsTotal, &session.Status, &session.CrawlID,
 		&session.CreatedAt, &session.UpdatedAt)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -1855,7 +1865,7 @@ func (s *GameStore) GetByRoomCode(ctx context.Context, code string) (*models.Gam
 }
 
 func (s *GameStore) UpdateStatus(ctx context.Context, id uuid.UUID, status models.GameStatus) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.pool.Exec(ctx,
 		`UPDATE game_sessions SET status = $1, updated_at = NOW() WHERE id = $2`,
 		status, id,
 	)
@@ -1863,7 +1873,7 @@ func (s *GameStore) UpdateStatus(ctx context.Context, id uuid.UUID, status model
 }
 
 func (s *GameStore) SetCrawlID(ctx context.Context, sessionID, crawlID uuid.UUID) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.pool.Exec(ctx,
 		`UPDATE game_sessions SET crawl_id = $1, updated_at = NOW() WHERE id = $2`,
 		crawlID, sessionID,
 	)
@@ -1908,8 +1918,8 @@ import (
 )
 
 func TestPlayerStore_Create(t *testing.T) {
-	db := setupTestDB(t)
-	playerStore := store.NewPlayerStore(db)
+	pool := setupTestDB(t)
+	playerStore := store.NewPlayerStore(pool)
 	ctx := context.Background()
 
 	_, session := createTestSession(t, db, "https://player-test.com")
@@ -1922,8 +1932,8 @@ func TestPlayerStore_Create(t *testing.T) {
 }
 
 func TestPlayerStore_GetBySessionID(t *testing.T) {
-	db := setupTestDB(t)
-	playerStore := store.NewPlayerStore(db)
+	pool := setupTestDB(t)
+	playerStore := store.NewPlayerStore(pool)
 	ctx := context.Background()
 
 	_, session := createTestSession(t, db, "https://player-list-test.com")
@@ -1939,8 +1949,8 @@ func TestPlayerStore_GetBySessionID(t *testing.T) {
 }
 
 func TestPlayerStore_CountBySessionID(t *testing.T) {
-	db := setupTestDB(t)
-	playerStore := store.NewPlayerStore(db)
+	pool := setupTestDB(t)
+	playerStore := store.NewPlayerStore(pool)
 	ctx := context.Background()
 
 	_, session := createTestSession(t, db, "https://player-count-test.com")
@@ -1972,23 +1982,25 @@ package store
 
 import (
 	"context"
-	"database/sql"
+	"errors"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jzy/howmuchyousay/internal/models"
 )
 
 type PlayerStore struct {
-	db *sql.DB
+	pool *pgxpool.Pool
 }
 
-func NewPlayerStore(db *sql.DB) *PlayerStore {
-	return &PlayerStore{db: db}
+func NewPlayerStore(pool *pgxpool.Pool) *PlayerStore {
+	return &PlayerStore{pool: pool}
 }
 
 func (s *PlayerStore) Create(ctx context.Context, sessionID uuid.UUID, nick string, isHost bool) (*models.Player, error) {
 	player := &models.Player{}
-	err := s.db.QueryRowContext(ctx,
+	err := s.pool.QueryRow(ctx,
 		`INSERT INTO players (session_id, nick, is_host)
 		 VALUES ($1, $2, $3)
 		 RETURNING id, session_id, nick, joined_at, is_host`,
@@ -2001,7 +2013,7 @@ func (s *PlayerStore) Create(ctx context.Context, sessionID uuid.UUID, nick stri
 }
 
 func (s *PlayerStore) GetBySessionID(ctx context.Context, sessionID uuid.UUID) ([]models.Player, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.pool.Query(ctx,
 		`SELECT id, session_id, nick, joined_at, is_host
 		 FROM players WHERE session_id = $1
 		 ORDER BY joined_at ASC`,
@@ -2025,7 +2037,7 @@ func (s *PlayerStore) GetBySessionID(ctx context.Context, sessionID uuid.UUID) (
 
 func (s *PlayerStore) CountBySessionID(ctx context.Context, sessionID uuid.UUID) (int, error) {
 	var count int
-	err := s.db.QueryRowContext(ctx,
+	err := s.pool.QueryRow(ctx,
 		`SELECT COUNT(*) FROM players WHERE session_id = $1`,
 		sessionID,
 	).Scan(&count)
@@ -2071,8 +2083,8 @@ import (
 )
 
 func TestRoundStore_Create(t *testing.T) {
-	db := setupTestDB(t)
-	roundStore := store.NewRoundStore(db)
+	pool := setupTestDB(t)
+	roundStore := store.NewRoundStore(pool)
 	ctx := context.Background()
 
 	_, session, products := createTestProducts(t, db, "https://round-test.com", 2)
@@ -2088,8 +2100,8 @@ func TestRoundStore_Create(t *testing.T) {
 }
 
 func TestRoundStore_CreateGuessRound(t *testing.T) {
-	db := setupTestDB(t)
-	roundStore := store.NewRoundStore(db)
+	pool := setupTestDB(t)
+	roundStore := store.NewRoundStore(pool)
 	ctx := context.Background()
 
 	_, session, products := createTestProducts(t, db, "https://guess-round-test.com", 1)
@@ -2101,8 +2113,8 @@ func TestRoundStore_CreateGuessRound(t *testing.T) {
 }
 
 func TestRoundStore_GetBySessionID(t *testing.T) {
-	db := setupTestDB(t)
-	roundStore := store.NewRoundStore(db)
+	pool := setupTestDB(t)
+	roundStore := store.NewRoundStore(pool)
 	ctx := context.Background()
 
 	_, session, products := createTestProducts(t, db, "https://round-list-test.com", 4)
@@ -2122,8 +2134,8 @@ func TestRoundStore_GetBySessionID(t *testing.T) {
 }
 
 func TestRoundStore_GetBySessionAndNumber(t *testing.T) {
-	db := setupTestDB(t)
-	roundStore := store.NewRoundStore(db)
+	pool := setupTestDB(t)
+	roundStore := store.NewRoundStore(pool)
 	ctx := context.Background()
 
 	_, session, products := createTestProducts(t, db, "https://round-number-test.com", 2)
@@ -2153,23 +2165,25 @@ package store
 
 import (
 	"context"
-	"database/sql"
+	"errors"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jzy/howmuchyousay/internal/models"
 )
 
 type RoundStore struct {
-	db *sql.DB
+	pool *pgxpool.Pool
 }
 
-func NewRoundStore(db *sql.DB) *RoundStore {
-	return &RoundStore{db: db}
+func NewRoundStore(pool *pgxpool.Pool) *RoundStore {
+	return &RoundStore{pool: pool}
 }
 
 func (s *RoundStore) Create(ctx context.Context, sessionID uuid.UUID, roundNumber int, roundType models.RoundType, productAID uuid.UUID, productBID *uuid.UUID, correctAnswer string, difficultyScore int) (*models.Round, error) {
 	round := &models.Round{}
-	err := s.db.QueryRowContext(ctx,
+	err := s.pool.QueryRow(ctx,
 		`INSERT INTO rounds (session_id, round_number, round_type, product_a_id, product_b_id, correct_answer, difficulty_score)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7)
 		 RETURNING id, session_id, round_number, round_type, product_a_id, product_b_id, correct_answer, difficulty_score`,
@@ -2183,7 +2197,7 @@ func (s *RoundStore) Create(ctx context.Context, sessionID uuid.UUID, roundNumbe
 }
 
 func (s *RoundStore) GetBySessionID(ctx context.Context, sessionID uuid.UUID) ([]models.Round, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.pool.Query(ctx,
 		`SELECT id, session_id, round_number, round_type, product_a_id, product_b_id, correct_answer, difficulty_score
 		 FROM rounds WHERE session_id = $1
 		 ORDER BY round_number ASC`,
@@ -2208,13 +2222,13 @@ func (s *RoundStore) GetBySessionID(ctx context.Context, sessionID uuid.UUID) ([
 
 func (s *RoundStore) GetBySessionAndNumber(ctx context.Context, sessionID uuid.UUID, roundNumber int) (*models.Round, error) {
 	round := &models.Round{}
-	err := s.db.QueryRowContext(ctx,
+	err := s.pool.QueryRow(ctx,
 		`SELECT id, session_id, round_number, round_type, product_a_id, product_b_id, correct_answer, difficulty_score
 		 FROM rounds WHERE session_id = $1 AND round_number = $2`,
 		sessionID, roundNumber,
 	).Scan(&round.ID, &round.SessionID, &round.RoundNumber, &round.RoundType,
 		&round.ProductAID, &round.ProductBID, &round.CorrectAnswer, &round.DifficultyScore)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -2262,8 +2276,8 @@ import (
 )
 
 func TestAnswerStore_Create(t *testing.T) {
-	db := setupTestDB(t)
-	answerStore := store.NewAnswerStore(db)
+	pool := setupTestDB(t)
+	answerStore := store.NewAnswerStore(pool)
 	ctx := context.Background()
 
 	_, round, player := createTestRound(t, db, "https://answer-test.com")
@@ -2277,9 +2291,9 @@ func TestAnswerStore_Create(t *testing.T) {
 }
 
 func TestAnswerStore_GetByRoundID(t *testing.T) {
-	db := setupTestDB(t)
-	answerStore := store.NewAnswerStore(db)
-	playerStore := store.NewPlayerStore(db)
+	pool := setupTestDB(t)
+	answerStore := store.NewAnswerStore(pool)
+	playerStore := store.NewPlayerStore(pool)
 	ctx := context.Background()
 
 	session, round, player1 := createTestRound(t, db, "https://answer-list-test.com")
@@ -2298,8 +2312,8 @@ func TestAnswerStore_GetByRoundID(t *testing.T) {
 }
 
 func TestAnswerStore_CountByRoundID(t *testing.T) {
-	db := setupTestDB(t)
-	answerStore := store.NewAnswerStore(db)
+	pool := setupTestDB(t)
+	answerStore := store.NewAnswerStore(pool)
 	ctx := context.Background()
 
 	_, round, player := createTestRound(t, db, "https://answer-count-test.com")
@@ -2313,13 +2327,13 @@ func TestAnswerStore_CountByRoundID(t *testing.T) {
 }
 
 func TestAnswerStore_GetPlayerTotalScore(t *testing.T) {
-	db := setupTestDB(t)
-	answerStore := store.NewAnswerStore(db)
-	roundStore := store.NewRoundStore(db)
+	pool := setupTestDB(t)
+	answerStore := store.NewAnswerStore(pool)
+	roundStore := store.NewRoundStore(pool)
 	ctx := context.Background()
 
 	_, session, products := createTestProducts(t, db, "https://score-test.com", 4)
-	playerStore := store.NewPlayerStore(db)
+	playerStore := store.NewPlayerStore(pool)
 	player, err := playerStore.Create(ctx, session.ID, "Scorer", true)
 	require.NoError(t, err)
 
@@ -2356,23 +2370,25 @@ package store
 
 import (
 	"context"
-	"database/sql"
+	"errors"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jzy/howmuchyousay/internal/models"
 )
 
 type AnswerStore struct {
-	db *sql.DB
+	pool *pgxpool.Pool
 }
 
-func NewAnswerStore(db *sql.DB) *AnswerStore {
-	return &AnswerStore{db: db}
+func NewAnswerStore(pool *pgxpool.Pool) *AnswerStore {
+	return &AnswerStore{pool: pool}
 }
 
 func (s *AnswerStore) Create(ctx context.Context, roundID, playerID uuid.UUID, answer string, isCorrect bool, pointsEarned int) (*models.Answer, error) {
 	a := &models.Answer{}
-	err := s.db.QueryRowContext(ctx,
+	err := s.pool.QueryRow(ctx,
 		`INSERT INTO answers (round_id, player_id, answer, is_correct, points_earned)
 		 VALUES ($1, $2, $3, $4, $5)
 		 RETURNING id, round_id, player_id, answer, is_correct, points_earned, answered_at`,
@@ -2385,7 +2401,7 @@ func (s *AnswerStore) Create(ctx context.Context, roundID, playerID uuid.UUID, a
 }
 
 func (s *AnswerStore) GetByRoundID(ctx context.Context, roundID uuid.UUID) ([]models.Answer, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.pool.Query(ctx,
 		`SELECT id, round_id, player_id, answer, is_correct, points_earned, answered_at
 		 FROM answers WHERE round_id = $1
 		 ORDER BY answered_at ASC`,
@@ -2410,7 +2426,7 @@ func (s *AnswerStore) GetByRoundID(ctx context.Context, roundID uuid.UUID) ([]mo
 
 func (s *AnswerStore) CountByRoundID(ctx context.Context, roundID uuid.UUID) (int, error) {
 	var count int
-	err := s.db.QueryRowContext(ctx,
+	err := s.pool.QueryRow(ctx,
 		`SELECT COUNT(*) FROM answers WHERE round_id = $1`,
 		roundID,
 	).Scan(&count)
@@ -2419,7 +2435,7 @@ func (s *AnswerStore) CountByRoundID(ctx context.Context, roundID uuid.UUID) (in
 
 func (s *AnswerStore) GetPlayerTotalScore(ctx context.Context, sessionID, playerID uuid.UUID) (int, error) {
 	var total int
-	err := s.db.QueryRowContext(ctx,
+	err := s.pool.QueryRow(ctx,
 		`SELECT COALESCE(SUM(a.points_earned), 0)
 		 FROM answers a
 		 JOIN rounds r ON r.id = a.round_id
