@@ -57,3 +57,14 @@ func createTestShop(t *testing.T, pool *pgxpool.Pool, url string) *models.Shop {
 	require.NoError(t, err)
 	return shop
 }
+
+// createTestShopAndCrawl creates a shop and a crawl (no session) for testing.
+func createTestShopAndCrawl(t *testing.T, pool *pgxpool.Pool, url string) (*models.Shop, *models.Crawl) {
+	t.Helper()
+	ctx := context.Background()
+	shop := createTestShop(t, pool, url)
+	crawlStore := store.NewCrawlStore(pool)
+	crawl, err := crawlStore.Create(ctx, shop.ID, nil, "/tmp/test.log")
+	require.NoError(t, err)
+	return shop, crawl
+}
