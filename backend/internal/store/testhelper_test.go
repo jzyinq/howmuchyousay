@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 
@@ -39,6 +40,8 @@ func setupTestDB(t *testing.T) *pgxpool.Pool {
 func cleanupTestDB(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 
+	// Nullify crawl_id in game_sessions first to break circular FK
+	_, _ = pool.Exec(context.Background(), "UPDATE game_sessions SET crawl_id = NULL")
 	tables := []string{"answers", "rounds", "players", "products", "crawls", "game_sessions", "shops"}
 	for _, table := range tables {
 		_, err := pool.Exec(context.Background(), "DELETE FROM "+table)
@@ -67,4 +70,49 @@ func createTestShopAndCrawl(t *testing.T, pool *pgxpool.Pool, url string) (*mode
 	crawl, err := crawlStore.Create(ctx, shop.ID, nil, "/tmp/test.log")
 	require.NoError(t, err)
 	return shop, crawl
+}
+
+// createTestSession creates a shop and a game session for testing.
+func createTestSession(t *testing.T, pool *pgxpool.Pool, shopURL string) (*models.Shop, *models.GameSession) {
+	t.Helper()
+	ctx := context.Background()
+	shop := createTestShop(t, pool, shopURL)
+	gameStore := store.NewGameStore(pool)
+	session, err := gameStore.Create(ctx, shop.ID, "TestHost", models.GameModeComparison, 10)
+	require.NoError(t, err)
+	return shop, session
+}
+
+// createTestProducts creates a shop, session, crawl, and N products for testing.
+func createTestProducts(t *testing.T, pool *pgxpool.Pool, shopURL string, count int) (*models.Shop, *models.GameSession, []models.Product) {
+	t.Helper()
+	ctx := context.Background()
+	shop, session := createTestSession(t, pool, shopURL)
+	crawlStore := store.NewCrawlStore(pool)
+	crawl, err := crawlStore.Create(ctx, shop.ID, nil, "/tmp/test.log")
+	require.NoError(t, err)
+	productStore := store.NewProductStore(pool)
+	var products []models.Product
+	for i := 0; i < count; i++ {
+		p, err := productStore.Create(ctx, shop.ID, crawl.ID,
+			fmt.Sprintf("Product %d", i), float64((i+1)*100), "", "")
+		require.NoError(t, err)
+		products = append(products, *p)
+	}
+	return shop, session, products
+}
+
+// createTestRound creates a full setup: shop, session, 2 products, 1 comparison round, 1 player.
+func createTestRound(t *testing.T, pool *pgxpool.Pool, shopURL string) (*models.GameSession, *models.Round, *models.Player) {
+	t.Helper()
+	ctx := context.Background()
+	_, session, products := createTestProducts(t, pool, shopURL, 2)
+	productBID := products[1].ID
+	roundStore := store.NewRoundStore(pool)
+	round, err := roundStore.Create(ctx, session.ID, 1, models.RoundTypeComparison, products[0].ID, &productBID, "b", 2)
+	require.NoError(t, err)
+	playerStore := store.NewPlayerStore(pool)
+	player, err := playerStore.Create(ctx, session.ID, "TestPlayer", true)
+	require.NoError(t, err)
+	return session, round, player
 }
