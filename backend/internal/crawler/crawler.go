@@ -174,11 +174,20 @@ func (c *Crawler) RunWithProgress(ctx context.Context, cfg CrawlConfig, sessionI
 	visited := make(map[string]bool)
 	toVisit := []string{cfg.URL}
 
+	// Track which URLs came from the sitemap so we can skip AI extraction for them.
+	// Sitemap URLs already have a declared location - we trust structured data
+	// (JSON-LD / OpenGraph) to hold the product info rather than sending the full
+	// page HTML to the AI.
+	sitemapURLSet := make(map[string]bool)
+
 	if len(sitemapURLs) > 0 {
 		logger.Log("FETCH", fmt.Sprintf("Found %d URLs from sitemap", len(sitemapURLs)))
 		report("sitemap", fmt.Sprintf("Found %d URLs in sitemap", len(sitemapURLs)))
 		sampled := SampleURLs(sitemapURLs, 100)
 		logger.Log("FETCH", fmt.Sprintf("Sampled %d URLs from sitemap for crawling", len(sampled)))
+		for _, u := range sampled {
+			sitemapURLSet[u] = true
+		}
 		toVisit = append(sampled, toVisit...)
 	}
 
@@ -197,6 +206,8 @@ func (c *Crawler) RunWithProgress(ctx context.Context, cfg CrawlConfig, sessionI
 		}
 		visited[currentURL] = true
 
+		fromSitemap := sitemapURLSet[currentURL]
+
 		// Fetch page
 		html, err := c.fetcher.Fetch(ctx, currentURL)
 		if err != nil {
@@ -207,14 +218,15 @@ func (c *Crawler) RunWithProgress(ctx context.Context, cfg CrawlConfig, sessionI
 		logger.Log("FETCH", fmt.Sprintf("Fetched %s, %d bytes", currentURL, len(html)))
 		report("fetch", fmt.Sprintf("Page %d: %s (%d bytes)", pagesVisited, currentURL, len(html)))
 
-		// Try structured data extraction first
+		// Try structured data extraction first (JSON-LD / OpenGraph).
 		products := ExtractProducts(html, currentURL)
 		if len(products) > 0 {
 			logger.Log("PARSE", fmt.Sprintf("Found %d products via structured data on %s", len(products), currentURL))
 		}
 
-		// If no structured data, try AI extraction
-		if len(products) == 0 && c.ai != nil {
+		// For sitemap-sourced URLs we rely solely on structured data; AI extraction
+		// is only used for pages discovered by crawling.
+		if len(products) == 0 && !fromSitemap && c.ai != nil {
 			logger.Log("AI_REQUEST", fmt.Sprintf("No structured data on %s, sending to AI", currentURL))
 			aiProducts, tokensUsed, err := c.ai.ExtractProducts(ctx, html, currentURL)
 			if err != nil {

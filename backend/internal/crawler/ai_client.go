@@ -63,8 +63,7 @@ HTML:
 		Messages: []openai.ChatCompletionMessageParamUnion{
 			openai.UserMessage(prompt),
 		},
-		Model:       c.model,
-		Temperature: openai.Float(0.1),
+		Model: c.model,
 	})
 	if err != nil {
 		return nil, 0, fmt.Errorf("OpenAI API error: %w", err)
@@ -110,8 +109,7 @@ HTML:
 		Messages: []openai.ChatCompletionMessageParamUnion{
 			openai.UserMessage(prompt),
 		},
-		Model:       c.model,
-		Temperature: openai.Float(0.1),
+		Model: c.model,
 	})
 	if err != nil {
 		return nil, 0, fmt.Errorf("OpenAI API error: %w", err)

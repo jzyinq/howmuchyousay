@@ -38,7 +38,8 @@ func NewCrawlLogger(logDir string, crawlID uuid.UUID) (*CrawlLogger, error) {
 	}, nil
 }
 
-// Log writes a structured log entry with timestamp and level.
+// Log writes a structured log entry with timestamp and level to both the log
+// file and stdout.
 // Level should be one of: FETCH, PARSE, AI_REQUEST, AI_RESPONSE, NAVIGATE,
 // PRODUCT_FOUND, VALIDATION, ERROR.
 func (l *CrawlLogger) Log(level string, message string) {
@@ -49,6 +50,7 @@ func (l *CrawlLogger) Log(level string, message string) {
 	entry := fmt.Sprintf("%s [%s] %s\n", timestamp, level, message)
 
 	l.file.WriteString(entry)
+	os.Stdout.WriteString(entry)
 }
 
 // FilePath returns the path to the log file.
