@@ -161,12 +161,26 @@ func (c *Crawler) RunWithProgress(ctx context.Context, cfg CrawlConfig, sessionI
 		}, nil
 	}
 
+	// 3.5 Try sitemap-based URL discovery
+	sitemapURLs, sitemapErr := FetchSitemapURLs(ctx, c.fetcher, cfg.URL)
+	if sitemapErr != nil {
+		logger.Log("FETCH", fmt.Sprintf("Sitemap fetch failed: %v", sitemapErr))
+	}
+
 	// 4. Crawl pages and collect products
 	var allProducts []RawProduct
 	pagesVisited := 0
 	aiRequestsCount := 0
 	visited := make(map[string]bool)
 	toVisit := []string{cfg.URL}
+
+	if len(sitemapURLs) > 0 {
+		logger.Log("FETCH", fmt.Sprintf("Found %d URLs from sitemap", len(sitemapURLs)))
+		report("sitemap", fmt.Sprintf("Found %d URLs in sitemap", len(sitemapURLs)))
+		sampled := SampleURLs(sitemapURLs, 100)
+		logger.Log("FETCH", fmt.Sprintf("Sampled %d URLs from sitemap for crawling", len(sampled)))
+		toVisit = append(sampled, toVisit...)
+	}
 
 	for len(toVisit) > 0 && len(allProducts) < cfg.MinProducts*2 {
 		// Check context (timeout)
