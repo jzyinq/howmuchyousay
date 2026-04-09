@@ -22,3 +22,4 @@ vendor/
 
 # Docker volumes
 pgdata/
+.worktrees/
