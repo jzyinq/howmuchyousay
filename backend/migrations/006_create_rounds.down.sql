@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS rounds;
+DROP TYPE IF EXISTS round_type;

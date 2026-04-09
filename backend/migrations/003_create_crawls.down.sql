@@ -1,0 +1,3 @@
+ALTER TABLE game_sessions DROP COLUMN IF EXISTS crawl_id;
+DROP TABLE IF EXISTS crawls;
+DROP TYPE IF EXISTS crawl_status;
