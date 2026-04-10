@@ -55,7 +55,7 @@ func TestToolHandlers_SaveProduct(t *testing.T) {
 		h.SaveProduct(RawProduct{Name: "iPhone 15 Pro", Price: 999.99, SourceURL: "https://shop.com/a"})
 		result := h.SaveProduct(RawProduct{Name: "iphone 15 pro", Price: 899.99, SourceURL: "https://shop.com/b"})
 
-		assert.Contains(t, result, "duplicate")
+		assert.Contains(t, result, "Duplicate")
 		assert.Len(t, h.SavedProducts(), 1)
 	})
 
@@ -65,7 +65,7 @@ func TestToolHandlers_SaveProduct(t *testing.T) {
 		h.SaveProduct(RawProduct{Name: "Product A", Price: 100, SourceURL: "https://shop.com/p/1"})
 		result := h.SaveProduct(RawProduct{Name: "Product B", Price: 200, SourceURL: "https://shop.com/p/1"})
 
-		assert.Contains(t, result, "duplicate")
+		assert.Contains(t, result, "Duplicate")
 		assert.Len(t, h.SavedProducts(), 1)
 	})
 }
