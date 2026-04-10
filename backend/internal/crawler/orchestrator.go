@@ -12,7 +12,7 @@ import (
 )
 
 // CrawlConfig fields used by Orchestrator: URL, Timeout, MinProducts, MaxScrapes.
-// CrawlConfig is defined in crawler.go (will be updated in Task 5).
+// CrawlConfig is defined in crawler.go.
 
 // OrchestratorResult contains the outcome of an orchestrator crawl loop.
 type OrchestratorResult struct {

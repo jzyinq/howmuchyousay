@@ -110,8 +110,8 @@ func TestToolHandlers_ScrapeCount(t *testing.T) {
 		h := NewToolHandlers(20)
 
 		assert.Equal(t, 0, h.ScrapeCount())
-		h.IncrementScrapeCount()
-		h.IncrementScrapeCount()
+		assert.True(t, h.TryIncrementScrapeCount(100))
+		assert.True(t, h.TryIncrementScrapeCount(100))
 		assert.Equal(t, 2, h.ScrapeCount())
 	})
 }

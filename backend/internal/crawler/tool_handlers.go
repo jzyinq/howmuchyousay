@@ -116,13 +116,6 @@ func (h *ToolHandlers) ScrapeCount() int {
 	return h.scrapeCount
 }
 
-// IncrementScrapeCount increments the scrape call counter.
-func (h *ToolHandlers) IncrementScrapeCount() {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.scrapeCount++
-}
-
 // TryIncrementScrapeCount atomically checks the safety cap and increments if allowed.
 // Returns true if the increment was allowed, false if the cap was reached.
 func (h *ToolHandlers) TryIncrementScrapeCount(maxScrapes int) bool {
