@@ -164,10 +164,8 @@ func (o *Orchestrator) handleToolCall(ctx context.Context, tc openai.ChatComplet
 	switch name {
 	case "discover_links":
 		result = o.handleDiscoverLinks(ctx, args, handlers, log)
-	case "extract_product":
-		result = o.handleExtractProduct(ctx, args, handlers, log)
-	case "save_product":
-		result = o.handleSaveProduct(args, handlers, log)
+	case "extract_and_save_product":
+		result = o.handleExtractAndSaveProduct(ctx, args, handlers, log)
 	case "get_status":
 		result = handlers.GetStatus()
 	case "done":
@@ -214,8 +212,8 @@ func (o *Orchestrator) handleDiscoverLinks(ctx context.Context, argsJSON string,
 	return sb.String()
 }
 
-// handleExtractProduct processes an extract_product tool call.
-func (o *Orchestrator) handleExtractProduct(ctx context.Context, argsJSON string, handlers *ToolHandlers, log OrchestratorLogger) string {
+// handleExtractAndSaveProduct extracts a product from a URL and saves it in one step.
+func (o *Orchestrator) handleExtractAndSaveProduct(ctx context.Context, argsJSON string, handlers *ToolHandlers, log OrchestratorLogger) string {
 	var args struct {
 		URL string `json:"url"`
 	}
@@ -233,7 +231,7 @@ func (o *Orchestrator) handleExtractProduct(ctx context.Context, argsJSON string
 
 	result, err := o.scraper.ExtractProduct(ctx, args.URL)
 	if err != nil {
-		log("TOOL_ERROR", fmt.Sprintf("extract_product failed for %s: %v", args.URL, err))
+		log("TOOL_ERROR", fmt.Sprintf("extract_and_save_product failed for %s: %v", args.URL, err))
 		return fmt.Sprintf("Failed to extract product from %s: %v", args.URL, err)
 	}
 
@@ -241,39 +239,23 @@ func (o *Orchestrator) handleExtractProduct(ctx context.Context, argsJSON string
 		return fmt.Sprintf("No product data found at %s. This may not be a product page — try discover_links instead.", args.URL)
 	}
 
-	return fmt.Sprintf("Product found:\n  Name: %s\n  Price: %.2f\n  Image: %s\n  Source: %s\nUse save_product to save it.",
-		result.Name, result.Price, result.ImageURL, args.URL)
-}
-
-// handleSaveProduct processes a save_product tool call.
-func (o *Orchestrator) handleSaveProduct(argsJSON string, handlers *ToolHandlers, log OrchestratorLogger) string {
-	var args struct {
-		Name      string  `json:"name"`
-		Price     float64 `json:"price"`
-		ImageURL  string  `json:"image_url"`
-		SourceURL string  `json:"source_url"`
-	}
-	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-		return fmt.Sprintf("Invalid arguments: %v", err)
-	}
-
 	product := RawProduct{
-		Name:      args.Name,
-		Price:     args.Price,
-		ImageURL:  args.ImageURL,
-		SourceURL: args.SourceURL,
+		Name:      result.Name,
+		Price:     result.Price,
+		ImageURL:  result.ImageURL,
+		SourceURL: args.URL,
 	}
 
-	result := handlers.SaveProduct(product)
+	saveResult := handlers.SaveProduct(product)
 
-	if strings.Contains(result, "Saved") {
+	if strings.Contains(saveResult, "Saved") {
 		log("PRODUCT_SAVED", fmt.Sprintf("Saved: %s ($%.2f). Progress: %d/%d",
-			args.Name, args.Price, len(handlers.SavedProducts()), handlers.MinProducts()))
+			result.Name, result.Price, len(handlers.SavedProducts()), handlers.MinProducts()))
 	} else {
-		log("PRODUCT_REJECTED", result)
+		log("PRODUCT_REJECTED", saveResult)
 	}
 
-	return result
+	return saveResult
 }
 
 // buildSystemPrompt creates the system prompt for the orchestrator.
@@ -284,8 +266,7 @@ Goal: Save at least %d products from %s.
 
 You have these tools:
 - discover_links(url): Explore a page to find links. Use on listing pages, category pages, and pagination pages.
-- extract_product(url): Extract product data from a single product page. Returns structured data (name, price, image_url). If extraction returns empty, the page is probably not a product page — try discover_links instead.
-- save_product(name, price, image_url, source_url): Save a valid product. Returns your current progress.
+- extract_and_save_product(url): Extract product data from a product page and save it automatically. Returns the saved product info and your progress, or an error if extraction fails.
 - get_status(): Check how many products you've saved and see the list.
 - done(): Call when you've saved enough products or exhausted available pages.
 
@@ -293,13 +274,12 @@ Strategy:
 1. Start by reviewing the initial page links provided below.
 2. Identify which links are product pages and which are category/listing/pagination pages.
 3. Use discover_links on category and pagination pages to find more products.
-4. Use extract_product on product pages, then save_product with the results.
+4. Use extract_and_save_product on product pages. You can call it on multiple URLs simultaneously — batch 3-5 product URLs per turn for efficiency.
 5. Call done() when you reach %d products or run out of pages to explore.
 
 Avoid:
-- Re-scraping URLs you've already visited.
-- Following links to non-product areas (blog, about, contact, FAQ, etc.).
-- Saving duplicate products.`, minProducts, shopURL, minProducts)
+- Re-scraping URLs you've already visited (the system tracks this automatically).
+- Following links to non-product areas (blog, about, contact, FAQ, etc.).`, minProducts, shopURL, minProducts)
 }
 
 // buildInitialMessage creates the first user message with initial links.
@@ -333,8 +313,8 @@ func buildToolDefinitions() []openai.ChatCompletionToolUnionParam {
 			},
 		}),
 		openai.ChatCompletionFunctionTool(openai.FunctionDefinitionParam{
-			Name:        "extract_product",
-			Description: openai.String("Extract product data from a single product page. Returns name, price, and image_url."),
+			Name:        "extract_and_save_product",
+			Description: openai.String("Extract product data from a product page and save it automatically. Returns saved product info and progress, or an error if extraction fails."),
 			Parameters: openai.FunctionParameters{
 				"type": "object",
 				"properties": map[string]any{
@@ -344,20 +324,6 @@ func buildToolDefinitions() []openai.ChatCompletionToolUnionParam {
 					},
 				},
 				"required": []string{"url"},
-			},
-		}),
-		openai.ChatCompletionFunctionTool(openai.FunctionDefinitionParam{
-			Name:        "save_product",
-			Description: openai.String("Save a product to the database. Returns progress info."),
-			Parameters: openai.FunctionParameters{
-				"type": "object",
-				"properties": map[string]any{
-					"name":       map[string]any{"type": "string", "description": "Product name"},
-					"price":      map[string]any{"type": "number", "description": "Product price"},
-					"image_url":  map[string]any{"type": "string", "description": "Product image URL"},
-					"source_url": map[string]any{"type": "string", "description": "Source page URL"},
-				},
-				"required": []string{"name", "price", "source_url"},
 			},
 		}),
 		openai.ChatCompletionFunctionTool(openai.FunctionDefinitionParam{

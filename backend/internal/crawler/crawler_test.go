@@ -76,7 +76,7 @@ func TestCrawler_RunWithOrchestrator(t *testing.T) {
 		},
 	}
 
-	// Mock OpenAI: extract product 1, save, extract product 2, save, done
+	// Mock OpenAI: extract_and_save product 1, extract_and_save product 2, done
 	callNum := 0
 	var mu sync.Mutex
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -90,30 +90,18 @@ func TestCrawler_RunWithOrchestrator(t *testing.T) {
 		case 1:
 			resp = openAIToolCallResponse([]map[string]interface{}{
 				{"id": "c1", "type": "function", "function": map[string]interface{}{
-					"name": "extract_product", "arguments": `{"url":"https://shop.com/product/1"}`,
+					"name": "extract_and_save_product", "arguments": `{"url":"https://shop.com/product/1"}`,
 				}},
 			})
 		case 2:
 			resp = openAIToolCallResponse([]map[string]interface{}{
 				{"id": "c2", "type": "function", "function": map[string]interface{}{
-					"name": "save_product", "arguments": `{"name":"Product One","price":99.99,"image_url":"https://img.com/1.jpg","source_url":"https://shop.com/product/1"}`,
+					"name": "extract_and_save_product", "arguments": `{"url":"https://shop.com/product/2"}`,
 				}},
 			})
 		case 3:
 			resp = openAIToolCallResponse([]map[string]interface{}{
 				{"id": "c3", "type": "function", "function": map[string]interface{}{
-					"name": "extract_product", "arguments": `{"url":"https://shop.com/product/2"}`,
-				}},
-			})
-		case 4:
-			resp = openAIToolCallResponse([]map[string]interface{}{
-				{"id": "c4", "type": "function", "function": map[string]interface{}{
-					"name": "save_product", "arguments": `{"name":"Product Two","price":199.99,"image_url":"https://img.com/2.jpg","source_url":"https://shop.com/product/2"}`,
-				}},
-			})
-		case 5:
-			resp = openAIToolCallResponse([]map[string]interface{}{
-				{"id": "c5", "type": "function", "function": map[string]interface{}{
 					"name": "done", "arguments": `{}`,
 				}},
 			})

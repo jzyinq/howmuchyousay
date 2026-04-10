@@ -16,7 +16,6 @@ import (
 )
 
 func TestOrchestrator_BasicFlow(t *testing.T) {
-	// Simulate: AI calls extract_product, then save_product, then done
 	callNum := 0
 	var mu sync.Mutex
 
@@ -29,34 +28,20 @@ func TestOrchestrator_BasicFlow(t *testing.T) {
 		var resp map[string]interface{}
 		switch n {
 		case 1:
-			// AI decides to extract a product
 			resp = openAIToolCallResponse([]map[string]interface{}{
 				{
 					"id":   "call_1",
 					"type": "function",
 					"function": map[string]interface{}{
-						"name":      "extract_product",
+						"name":      "extract_and_save_product",
 						"arguments": `{"url":"https://shop.com/product/1"}`,
 					},
 				},
 			})
 		case 2:
-			// AI saves the product
 			resp = openAIToolCallResponse([]map[string]interface{}{
 				{
 					"id":   "call_2",
-					"type": "function",
-					"function": map[string]interface{}{
-						"name":      "save_product",
-						"arguments": `{"name":"Test Product","price":99.99,"image_url":"https://img.com/test.jpg","source_url":"https://shop.com/product/1"}`,
-					},
-				},
-			})
-		case 3:
-			// AI calls done
-			resp = openAIToolCallResponse([]map[string]interface{}{
-				{
-					"id":   "call_3",
 					"type": "function",
 					"function": map[string]interface{}{
 						"name":      "done",
@@ -106,7 +91,67 @@ func TestOrchestrator_BasicFlow(t *testing.T) {
 
 	assert.Len(t, result.Products, 1)
 	assert.Equal(t, "Test Product", result.Products[0].Name)
+	assert.Equal(t, 99.99, result.Products[0].Price)
+	assert.Equal(t, "https://shop.com/product/1", result.Products[0].SourceURL)
+	assert.True(t, result.DoneByAI)
 	assert.True(t, result.TotalTokensUsed > 0)
+}
+
+func TestOrchestrator_ExtractAndSaveProduct_NotFound(t *testing.T) {
+	callNum := 0
+	var mu sync.Mutex
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		callNum++
+		n := callNum
+		mu.Unlock()
+
+		var resp map[string]interface{}
+		switch n {
+		case 1:
+			resp = openAIToolCallResponse([]map[string]interface{}{
+				{
+					"id":   "call_1",
+					"type": "function",
+					"function": map[string]interface{}{
+						"name":      "extract_and_save_product",
+						"arguments": `{"url":"https://shop.com/about"}`,
+					},
+				},
+			})
+		default:
+			resp = openAIStopResponse("No more products")
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	scraper := &mockFirecrawlScraper{
+		extractProductFn: func(ctx context.Context, url string) (*crawler.ProductExtractionResult, error) {
+			return &crawler.ProductExtractionResult{Found: false}, nil
+		},
+	}
+
+	initialLinks := &crawler.LinkDiscoveryResult{
+		PageURL:   "https://shop.com",
+		PageTitle: "Test Shop",
+		Links:     []string{"https://shop.com/about"},
+	}
+
+	orch := crawler.NewOrchestrator("test-api-key", "gpt-5-mini", server.URL, scraper)
+	cfg := crawler.CrawlConfig{
+		URL:         "https://shop.com",
+		Timeout:     30 * time.Second,
+		MinProducts: 1,
+		MaxScrapes:  50,
+	}
+
+	result, err := orch.Run(context.Background(), initialLinks, cfg, nil)
+	require.NoError(t, err)
+	assert.Len(t, result.Products, 0)
 }
 
 func TestOrchestrator_SafetyCapBreaksLoop(t *testing.T) {
