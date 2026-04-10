@@ -613,7 +613,6 @@ package game
 
 import (
 	"errors"
-	"math/rand/v2"
 
 	"github.com/jzy/howmuchyousay/internal/models"
 )
@@ -640,7 +639,7 @@ type RoundDef struct {
 }
 ```
 
-This step only defines the types. Implementation comes after the test.
+This step only defines the types and error sentinels. Note: `math/rand/v2` is NOT imported here — it will be added in Step 4 when `GenerateComparisonRounds` is implemented. Go rejects unused imports, so we only add it when needed.
 
 - [ ] **Step 2: Write round_gen_test.go with comparison round generation tests**
 
@@ -803,9 +802,40 @@ Expected: Compilation error — `GenerateComparisonRounds` undefined.
 
 - [ ] **Step 4: Implement GenerateComparisonRounds in round_gen.go**
 
-Add to `backend/internal/game/round_gen.go` (after the existing type definitions):
+Update `backend/internal/game/round_gen.go` — replace the imports block and append the function after the existing type definitions. The full file should be:
 
 ```go
+package game
+
+import (
+	"errors"
+	"math/rand/v2"
+
+	"github.com/google/uuid"
+	"github.com/jzy/howmuchyousay/internal/models"
+)
+
+// MinPriceDiffPercent is the minimum price difference required between products in a comparison pair.
+const MinPriceDiffPercent = 5.0
+
+var (
+	// ErrNotEnoughProducts is returned when the product pool is too small to generate the requested rounds.
+	ErrNotEnoughProducts = errors.New("not enough products to generate rounds")
+	// ErrNotEnoughValidPairs is returned when not enough product pairs meet the minimum price difference.
+	ErrNotEnoughValidPairs = errors.New("not enough valid product pairs with sufficient price difference")
+)
+
+// RoundDef is the intermediate round definition before persisting to the database.
+// It contains all data needed to create a Round row via RoundStore.Create().
+type RoundDef struct {
+	RoundNumber     int
+	RoundType       models.RoundType
+	ProductA        models.Product
+	ProductB        *models.Product // nil for guess rounds
+	CorrectAnswer   string
+	DifficultyScore int
+}
+
 // GenerateComparisonRounds creates comparison round definitions from a product pool.
 //
 // Each round pairs two products with >= 5% price difference. No product is reused across rounds.
@@ -874,18 +904,6 @@ func GenerateComparisonRounds(products []models.Product, count int, rng *rand.Ra
 
 	return rounds, nil
 }
-```
-
-Also add the uuid import to the imports block:
-
-```go
-import (
-	"errors"
-	"math/rand/v2"
-
-	"github.com/google/uuid"
-	"github.com/jzy/howmuchyousay/internal/models"
-)
 ```
 
 - [ ] **Step 5: Run tests to verify they pass**
@@ -1065,7 +1083,7 @@ git commit -m "feat(game): add guess round generation"
 - Create: `backend/internal/game/results.go`
 - Create: `backend/internal/game/results_test.go`
 
-Given all players, their answers, and round data for a session, produce a ranked leaderboard. Each player gets: total points, correct answer count, total rounds played, and their best single-round score.
+Given all players, their answers, and round data for a session, produce a ranked leaderboard. Each player gets: rank, total points, correct answer count, total rounds played, and their best single-round score. Tied players share the same rank.
 
 - [ ] **Step 1: Write results_test.go**
 
@@ -1115,6 +1133,7 @@ func TestCalcResults(t *testing.T) {
 	require.Len(t, results, 2)
 
 	// Bob wins: 7 points (0+2+5), Alice: 4 points (3+1+0)
+	assert.Equal(t, 1, results[0].Rank)
 	assert.Equal(t, "Bob", results[0].Nick)
 	assert.Equal(t, player2.ID, results[0].PlayerID)
 	assert.Equal(t, 7, results[0].TotalPoints)
@@ -1122,6 +1141,7 @@ func TestCalcResults(t *testing.T) {
 	assert.Equal(t, 3, results[0].TotalRounds)
 	assert.Equal(t, 5, results[0].BestRoundScore)
 
+	assert.Equal(t, 2, results[1].Rank)
 	assert.Equal(t, "Alice", results[1].Nick)
 	assert.Equal(t, player1.ID, results[1].PlayerID)
 	assert.Equal(t, 4, results[1].TotalPoints)
@@ -1140,7 +1160,7 @@ func TestCalcResultsTiebreaker(t *testing.T) {
 
 	now := time.Now()
 
-	// Same points — order is stable (by original player order)
+	// Same points — tied players share the same rank
 	answers := []models.Answer{
 		{ID: uuid.New(), RoundID: round1.ID, PlayerID: player1.ID, IsCorrect: true, PointsEarned: 3, AnsweredAt: now},
 		{ID: uuid.New(), RoundID: round1.ID, PlayerID: player2.ID, IsCorrect: true, PointsEarned: 3, AnsweredAt: now},
@@ -1149,7 +1169,9 @@ func TestCalcResultsTiebreaker(t *testing.T) {
 	results := CalcResults([]models.Player{player1, player2}, answers, []models.Round{round1})
 	require.Len(t, results, 2)
 
-	// Both have 3 points, 1 correct, best round 3
+	// Both have 3 points — same rank
+	assert.Equal(t, 1, results[0].Rank)
+	assert.Equal(t, 1, results[1].Rank)
 	assert.Equal(t, 3, results[0].TotalPoints)
 	assert.Equal(t, 3, results[1].TotalPoints)
 }
@@ -1163,6 +1185,7 @@ func TestCalcResultsNoAnswers(t *testing.T) {
 	results := CalcResults([]models.Player{player1}, nil, []models.Round{round1})
 	require.Len(t, results, 1)
 
+	assert.Equal(t, 1, results[0].Rank)
 	assert.Equal(t, "Alice", results[0].Nick)
 	assert.Equal(t, 0, results[0].TotalPoints)
 	assert.Equal(t, 0, results[0].CorrectCount)
@@ -1186,11 +1209,39 @@ func TestCalcResultsSinglePlayer(t *testing.T) {
 	results := CalcResults([]models.Player{player}, answers, []models.Round{round1, round2})
 	require.Len(t, results, 1)
 
+	assert.Equal(t, 1, results[0].Rank)
 	assert.Equal(t, "Solo", results[0].Nick)
 	assert.Equal(t, 7, results[0].TotalPoints)
 	assert.Equal(t, 2, results[0].CorrectCount)
 	assert.Equal(t, 2, results[0].TotalRounds)
 	assert.Equal(t, 5, results[0].BestRoundScore)
+}
+
+func TestCalcResultsThreePlayersWithTie(t *testing.T) {
+	sessionID := uuid.New()
+
+	player1 := models.Player{ID: uuid.New(), SessionID: sessionID, Nick: "Alice"}
+	player2 := models.Player{ID: uuid.New(), SessionID: sessionID, Nick: "Bob"}
+	player3 := models.Player{ID: uuid.New(), SessionID: sessionID, Nick: "Charlie"}
+
+	round1 := models.Round{ID: uuid.New(), SessionID: sessionID, RoundNumber: 1}
+
+	now := time.Now()
+
+	// Alice: 5pts, Bob: 3pts, Charlie: 3pts — Bob and Charlie tied at rank 2
+	answers := []models.Answer{
+		{ID: uuid.New(), RoundID: round1.ID, PlayerID: player1.ID, IsCorrect: true, PointsEarned: 5, AnsweredAt: now},
+		{ID: uuid.New(), RoundID: round1.ID, PlayerID: player2.ID, IsCorrect: true, PointsEarned: 3, AnsweredAt: now},
+		{ID: uuid.New(), RoundID: round1.ID, PlayerID: player3.ID, IsCorrect: true, PointsEarned: 3, AnsweredAt: now},
+	}
+
+	results := CalcResults([]models.Player{player1, player2, player3}, answers, []models.Round{round1})
+	require.Len(t, results, 3)
+
+	assert.Equal(t, 1, results[0].Rank)
+	assert.Equal(t, "Alice", results[0].Nick)
+	assert.Equal(t, 2, results[1].Rank)
+	assert.Equal(t, 2, results[2].Rank)
 }
 ```
 
@@ -1218,6 +1269,7 @@ import (
 type PlayerScore struct {
 	PlayerID       uuid.UUID `json:"player_id"`
 	Nick           string    `json:"nick"`
+	Rank           int       `json:"rank"`
 	TotalPoints    int       `json:"total_points"`
 	CorrectCount   int       `json:"correct_count"`
 	TotalRounds    int       `json:"total_rounds"`
@@ -1231,7 +1283,8 @@ type PlayerScore struct {
 //   - answers: all answers across all rounds in the session
 //   - rounds: all rounds in the session (used only for total round count)
 //
-// Returns a slice of PlayerScore sorted by TotalPoints descending. Ties preserve input order.
+// Returns a slice of PlayerScore sorted by TotalPoints descending.
+// Tied players share the same rank (e.g., 1st, 2nd, 2nd, 4th).
 func CalcResults(players []models.Player, answers []models.Answer, rounds []models.Round) []PlayerScore {
 	totalRounds := len(rounds)
 
@@ -1279,6 +1332,15 @@ func CalcResults(players []models.Player, answers []models.Answer, rounds []mode
 	sort.SliceStable(results, func(i, j int) bool {
 		return results[i].TotalPoints > results[j].TotalPoints
 	})
+
+	// Assign ranks — tied players share the same rank
+	for i := range results {
+		if i == 0 || results[i].TotalPoints < results[i-1].TotalPoints {
+			results[i].Rank = i + 1
+		} else {
+			results[i].Rank = results[i-1].Rank
+		}
+	}
 
 	return results
 }
