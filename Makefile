@@ -6,7 +6,7 @@ dev:
 
 test:
 	docker compose up -d postgres-test
-	cd backend && TEST_DATABASE_URL="postgres://hmys:hmys_test@localhost:5433/howmuchyousay_test?sslmode=disable" go test ./... -v
+	cd backend && TEST_DATABASE_URL="postgres://hmys:hmys_test@localhost:5433/howmuchyousay_test?sslmode=disable" go test -p 1 ./... -v
 
 migrate-up:
 	cd backend && go run -tags migrate ./cmd/server/ -migrate up

@@ -61,7 +61,7 @@ This task implements the core math used by both game modes. All formulas come fr
 - Deviation: `|guessed - actual| / actual * 100`
 - Tiers: <=2% → 5pts (exact hit), <=10% → 3pts, <=20% → 2pts, <=30% → 1pt, >30% → 0pts
 
-- [ ] **Step 1: Write scoring_test.go with table-driven tests**
+- [x] **Step 1: Write scoring_test.go with table-driven tests**
 
 Create `backend/internal/game/scoring_test.go`:
 
@@ -178,13 +178,13 @@ func TestGuessPoints(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `go test ./internal/game/ -v -count=1`
 Working directory: `backend/`
 Expected: Compilation error — package `game` does not exist yet.
 
-- [ ] **Step 3: Implement scoring.go**
+- [x] **Step 3: Implement scoring.go**
 
 Create `backend/internal/game/scoring.go`:
 
@@ -254,13 +254,13 @@ func GuessPoints(deviationPercent float64) int {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `go test ./internal/game/ -v -count=1`
 Working directory: `backend/`
 Expected: All tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/internal/game/scoring.go backend/internal/game/scoring_test.go
@@ -277,7 +277,7 @@ git commit -m "feat(game): add scoring functions for comparison and guess modes"
 
 Evaluates a player's comparison answer. The player answers "a" or "b" indicating which product they think is more expensive (or cheaper — the question direction is implicit in `correctAnswer` stored on the round). This function checks correctness and calculates points.
 
-- [ ] **Step 1: Write comparison_test.go**
+- [x] **Step 1: Write comparison_test.go**
 
 Create `backend/internal/game/comparison_test.go`:
 
@@ -368,13 +368,13 @@ func TestEvalComparisonInvalidAnswer(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `go test ./internal/game/ -v -run TestEvalComparison -count=1`
 Working directory: `backend/`
 Expected: Compilation error — `EvalComparison` undefined.
 
-- [ ] **Step 3: Implement comparison.go**
+- [x] **Step 3: Implement comparison.go**
 
 Create `backend/internal/game/comparison.go`:
 
@@ -407,13 +407,13 @@ func EvalComparison(answer, correctAnswer string, priceA, priceB float64) (bool,
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `go test ./internal/game/ -v -run TestEvalComparison -count=1`
 Working directory: `backend/`
 Expected: All tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/internal/game/comparison.go backend/internal/game/comparison_test.go
@@ -430,7 +430,7 @@ git commit -m "feat(game): add comparison answer evaluation"
 
 Evaluates a player's guess. The player enters a price, we compute deviation from the actual price and return points.
 
-- [ ] **Step 1: Write guess_test.go**
+- [x] **Step 1: Write guess_test.go**
 
 Create `backend/internal/game/guess_test.go`:
 
@@ -540,13 +540,13 @@ func TestEvalGuessZeroPrice(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `go test ./internal/game/ -v -run TestEvalGuess -count=1`
 Working directory: `backend/`
 Expected: Compilation error — `EvalGuess` undefined.
 
-- [ ] **Step 3: Implement guess.go**
+- [x] **Step 3: Implement guess.go**
 
 Create `backend/internal/game/guess.go`:
 
@@ -581,13 +581,13 @@ func FormatCorrectGuessAnswer(price float64) string {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `go test ./internal/game/ -v -run TestEvalGuess -count=1`
 Working directory: `backend/`
 Expected: All tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/internal/game/guess.go backend/internal/game/guess_test.go
@@ -604,7 +604,7 @@ git commit -m "feat(game): add guess answer evaluation"
 
 Generates comparison rounds from a product pool. Each round picks a pair of products with >= 5% price difference. No product is reused across rounds. The correct answer is which product is more expensive ("a" or "b").
 
-- [ ] **Step 1: Write round_gen.go with the RoundDef type and GenerateComparisonRounds stub**
+- [x] **Step 1: Write round_gen.go with the RoundDef type and GenerateComparisonRounds stub**
 
 Create `backend/internal/game/round_gen.go`:
 
@@ -641,7 +641,7 @@ type RoundDef struct {
 
 This step only defines the types and error sentinels. Note: `math/rand/v2` is NOT imported here — it will be added in Step 4 when `GenerateComparisonRounds` is implemented. Go rejects unused imports, so we only add it when needed.
 
-- [ ] **Step 2: Write round_gen_test.go with comparison round generation tests**
+- [x] **Step 2: Write round_gen_test.go with comparison round generation tests**
 
 Create `backend/internal/game/round_gen_test.go`:
 
@@ -794,13 +794,13 @@ func TestGenerateComparisonRoundsDeterministic(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Run tests to verify they fail**
+- [x] **Step 3: Run tests to verify they fail**
 
 Run: `go test ./internal/game/ -v -run TestGenerateComparison -count=1`
 Working directory: `backend/`
 Expected: Compilation error — `GenerateComparisonRounds` undefined.
 
-- [ ] **Step 4: Implement GenerateComparisonRounds in round_gen.go**
+- [x] **Step 4: Implement GenerateComparisonRounds in round_gen.go**
 
 Update `backend/internal/game/round_gen.go` — replace the imports block and append the function after the existing type definitions. The full file should be:
 
@@ -906,13 +906,13 @@ func GenerateComparisonRounds(products []models.Product, count int, rng *rand.Ra
 }
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `go test ./internal/game/ -v -run TestGenerateComparison -count=1`
 Working directory: `backend/`
 Expected: All tests PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add backend/internal/game/round_gen.go backend/internal/game/round_gen_test.go
@@ -929,7 +929,7 @@ git commit -m "feat(game): add comparison round generation with product pairing"
 
 Generates guess rounds from a product pool. Each round picks a single product. No reuse.
 
-- [ ] **Step 1: Add guess round generation tests to round_gen_test.go**
+- [x] **Step 1: Add guess round generation tests to round_gen_test.go**
 
 Append to `backend/internal/game/round_gen_test.go`:
 
@@ -1009,13 +1009,13 @@ func TestGenerateGuessRoundsDeterministic(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `go test ./internal/game/ -v -run TestGenerateGuess -count=1`
 Working directory: `backend/`
 Expected: Compilation error — `GenerateGuessRounds` undefined.
 
-- [ ] **Step 3: Implement GenerateGuessRounds in round_gen.go**
+- [x] **Step 3: Implement GenerateGuessRounds in round_gen.go**
 
 Add to `backend/internal/game/round_gen.go`:
 
@@ -1056,19 +1056,19 @@ func GenerateGuessRounds(products []models.Product, count int, rng *rand.Rand) (
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `go test ./internal/game/ -v -run TestGenerateGuess -count=1`
 Working directory: `backend/`
 Expected: All tests PASS.
 
-- [ ] **Step 5: Run all round_gen tests together**
+- [x] **Step 5: Run all round_gen tests together**
 
 Run: `go test ./internal/game/ -v -run TestGenerate -count=1`
 Working directory: `backend/`
 Expected: All tests PASS (both comparison and guess).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add backend/internal/game/round_gen.go backend/internal/game/round_gen_test.go
@@ -1085,7 +1085,7 @@ git commit -m "feat(game): add guess round generation"
 
 Given all players, their answers, and round data for a session, produce a ranked leaderboard. Each player gets: rank, total points, correct answer count, total rounds played, and their best single-round score. Tied players share the same rank.
 
-- [ ] **Step 1: Write results_test.go**
+- [x] **Step 1: Write results_test.go**
 
 Create `backend/internal/game/results_test.go`:
 
@@ -1245,13 +1245,13 @@ func TestCalcResultsThreePlayersWithTie(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `go test ./internal/game/ -v -run TestCalcResults -count=1`
 Working directory: `backend/`
 Expected: Compilation error — `CalcResults` and `PlayerScore` undefined.
 
-- [ ] **Step 3: Implement results.go**
+- [x] **Step 3: Implement results.go**
 
 Create `backend/internal/game/results.go`:
 
@@ -1346,13 +1346,13 @@ func CalcResults(players []models.Player, answers []models.Answer, rounds []mode
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `go test ./internal/game/ -v -run TestCalcResults -count=1`
 Working directory: `backend/`
 Expected: All tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/internal/game/results.go backend/internal/game/results_test.go
@@ -1368,31 +1368,31 @@ git commit -m "feat(game): add results aggregation with player rankings"
 
 Final verification that all tests pass together and the package compiles cleanly.
 
-- [ ] **Step 1: Run all game package tests**
+- [x] **Step 1: Run all game package tests**
 
 Run: `go test ./internal/game/ -v -count=1`
 Working directory: `backend/`
 Expected: All tests PASS (scoring, comparison, guess, round generation comparison, round generation guess, results).
 
-- [ ] **Step 2: Run go vet on the game package**
+- [x] **Step 2: Run go vet on the game package**
 
 Run: `go vet ./internal/game/`
 Working directory: `backend/`
 Expected: No issues.
 
-- [ ] **Step 3: Verify the full project still builds**
+- [x] **Step 3: Verify the full project still builds**
 
 Run: `go build ./...`
 Working directory: `backend/`
 Expected: Build succeeds.
 
-- [ ] **Step 4: Run all project tests (game + store)**
+- [x] **Step 4: Run all project tests (game + store)**
 
 Run: `go test ./... -count=1`
 Working directory: `backend/`
 Expected: All tests PASS (game tests run without DB; store tests may skip if no test DB — that's fine).
 
-- [ ] **Step 5: Commit any cleanup if needed**
+- [x] **Step 5: Commit any cleanup if needed**
 
 Only if Steps 1-4 revealed issues that needed fixing:
 
