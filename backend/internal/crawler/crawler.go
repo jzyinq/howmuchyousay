@@ -28,9 +28,7 @@ type CrawlConfig struct {
 	Timeout time.Duration
 	// MinProducts is the minimum number of products to collect.
 	MinProducts int
-	// MaxDepth is the maximum crawl depth for Firecrawl (0 uses default of 3).
-	MaxDepth int
-	// MaxScrapes is the safety cap on the number of Firecrawl scrape calls.
+	// MaxScrapes is the maximum number of Firecrawl scrape calls (safety cap).
 	MaxScrapes int
 	// Verbose enables extra stdout output (for CLI mode).
 	Verbose bool
@@ -40,8 +38,9 @@ type CrawlConfig struct {
 func DefaultCrawlConfig(url string) CrawlConfig {
 	return CrawlConfig{
 		URL:         url,
-		Timeout:     90 * time.Second,
+		Timeout:     300 * time.Second,
 		MinProducts: 20,
+		MaxScrapes:  50,
 		Verbose:     false,
 	}
 }
@@ -54,16 +53,17 @@ type CrawlResult struct {
 	CrawlID         uuid.UUID
 	ShopID          uuid.UUID
 	ProductsFound   int
-	PagesVisited    int
+	ScrapeCount     int
 	AIRequestsCount int
+	TotalTokensUsed int
 	Duration        time.Duration
 	LogFilePath     string
 }
 
 // Crawler orchestrates the product crawling pipeline.
 type Crawler struct {
-	fc           FirecrawlCrawler
-	ai           AIClient
+	scraper      FirecrawlScraper
+	orchestrator *Orchestrator
 	shopStore    *store.ShopStore
 	crawlStore   *store.CrawlStore
 	productStore *store.ProductStore
@@ -72,16 +72,16 @@ type Crawler struct {
 
 // New creates a new Crawler with all dependencies.
 func New(
-	fc FirecrawlCrawler,
-	ai AIClient,
+	scraper FirecrawlScraper,
+	orchestrator *Orchestrator,
 	shopStore *store.ShopStore,
 	crawlStore *store.CrawlStore,
 	productStore *store.ProductStore,
 	logDir string,
 ) *Crawler {
 	return &Crawler{
-		fc:           fc,
-		ai:           ai,
+		scraper:      scraper,
+		orchestrator: orchestrator,
 		shopStore:    shopStore,
 		crawlStore:   crawlStore,
 		productStore: productStore,
@@ -134,13 +134,13 @@ func (c *Crawler) RunWithProgress(ctx context.Context, cfg CrawlConfig, sessionI
 		return nil, fmt.Errorf("updating crawl status: %w", err)
 	}
 
-	logger.Log("FIRECRAWL_START", fmt.Sprintf("Starting Firecrawl job for %s", cfg.URL))
-	report("start", fmt.Sprintf("Starting crawl for %s", cfg.URL))
+	// 3. Scrape initial page for links
+	logger.Log("ORCHESTRATOR_START", fmt.Sprintf("Scraping initial page: %s", cfg.URL))
+	report("start", fmt.Sprintf("Scraping initial page: %s", cfg.URL))
 
-	// 3. Run Firecrawl crawl
-	pages, err := c.fc.CrawlSite(ctx, cfg.URL, cfg)
+	initialLinks, err := c.scraper.DiscoverLinks(ctx, cfg.URL)
 	if err != nil {
-		errMsg := fmt.Sprintf("Firecrawl error: %v", err)
+		errMsg := fmt.Sprintf("Failed to scrape initial page: %v", err)
 		logger.Log("ERROR", errMsg)
 		if finErr := c.crawlStore.Finish(ctx, crawl.ID, models.CrawlStatusFailed, 0, 0, 0, &errMsg); finErr != nil {
 			logger.Log("ERROR", fmt.Sprintf("Failed to finish crawl record: %v", finErr))
@@ -153,77 +153,55 @@ func (c *Crawler) RunWithProgress(ctx context.Context, cfg CrawlConfig, sessionI
 		}, nil
 	}
 
-	logger.Log("FIRECRAWL_COMPLETE", fmt.Sprintf("Firecrawl returned %d pages", len(pages)))
-	report("firecrawl_complete", fmt.Sprintf("Firecrawl returned %d pages", len(pages)))
-
-	if len(pages) == 0 {
-		errMsg := "Firecrawl returned 0 pages"
+	if len(initialLinks.Links) == 0 {
+		errMsg := "No links found on initial page"
 		logger.Log("ERROR", errMsg)
-		if finErr := c.crawlStore.Finish(ctx, crawl.ID, models.CrawlStatusFailed, 0, 0, 0, &errMsg); finErr != nil {
+		if finErr := c.crawlStore.Finish(ctx, crawl.ID, models.CrawlStatusFailed, 0, 1, 0, &errMsg); finErr != nil {
 			logger.Log("ERROR", fmt.Sprintf("Failed to finish crawl record: %v", finErr))
 		}
 		return &CrawlResult{
 			CrawlID:     crawl.ID,
 			ShopID:      shop.ID,
+			ScrapeCount: 1,
 			Duration:    time.Since(start),
 			LogFilePath: logger.FilePath(),
 		}, nil
 	}
 
-	// 4. Extract products from each page
-	var allProducts []RawProduct
-	pagesVisited := 0
-	aiRequestsCount := 0
+	logger.Log("TOOL_RESULT", fmt.Sprintf("Initial page has %d links", len(initialLinks.Links)))
+	report("links_found", fmt.Sprintf("Found %d links on initial page", len(initialLinks.Links)))
 
-	for i, page := range pages {
-		if ctx.Err() != nil {
-			logger.Log("ERROR", "Timeout reached during product extraction")
-			break
-		}
-
-		if !PageHasContent(page) {
-			continue
-		}
-		pagesVisited++
-
-		report("extract", fmt.Sprintf("Processing page %d/%d: %s", i+1, len(pages), page.URL))
-
-		// Try metadata-based extraction first (OG product data)
-		products := ExtractProductsFromPage(page)
-		if len(products) > 0 {
-			logger.Log("PRODUCT_FOUND", fmt.Sprintf("Found %d products via metadata on %s", len(products), page.URL))
-		}
-
-		// If no products from metadata and page has product signals, use AI
-		if len(products) == 0 && c.ai != nil && HasProductSignals(page) {
-			logger.Log("AI_REQUEST", fmt.Sprintf("Sending markdown to AI for %s", page.URL))
-			aiProducts, tokensUsed, err := c.ai.ExtractProducts(ctx, page.Markdown, page.URL)
-			if err != nil {
-				logger.Log("ERROR", fmt.Sprintf("AI extraction failed for %s: %v", page.URL, err))
-			} else {
-				aiRequestsCount++
-				logger.Log("AI_RESPONSE", fmt.Sprintf("AI found %d products, used %d tokens", len(aiProducts), tokensUsed))
-				products = aiProducts
-			}
-		}
-
-		for _, p := range products {
-			logger.Log("PRODUCT_FOUND", fmt.Sprintf("Product: %s, Price: %.2f", p.Name, p.Price))
-		}
-		allProducts = append(allProducts, products...)
-		report("products", fmt.Sprintf("Total products so far: %d", len(allProducts)))
+	// 4. Run orchestrator loop
+	orchLogger := func(event, msg string) {
+		logger.Log(event, msg)
+		report(event, msg)
 	}
 
-	// 5. Validate and deduplicate
-	validProducts, rejectedProducts := ValidateProducts(allProducts)
-	for _, r := range rejectedProducts {
-		logger.Log("VALIDATION", fmt.Sprintf("Rejected: %s - %s", r.Product.Name, r.Reason))
+	orchResult, err := c.orchestrator.Run(ctx, initialLinks, cfg, orchLogger)
+	if err != nil {
+		errMsg := fmt.Sprintf("Orchestrator error: %v", err)
+		logger.Log("ERROR", errMsg)
+		scrapes := 1
+		aiReqs := 0
+		if orchResult != nil {
+			scrapes += orchResult.ScrapeCount
+			aiReqs = orchResult.AIRequestCount
+		}
+		if finErr := c.crawlStore.Finish(ctx, crawl.ID, models.CrawlStatusFailed, 0, scrapes, aiReqs, &errMsg); finErr != nil {
+			logger.Log("ERROR", fmt.Sprintf("Failed to finish crawl record: %v", finErr))
+		}
+		return &CrawlResult{
+			CrawlID:     crawl.ID,
+			ShopID:      shop.ID,
+			ScrapeCount: scrapes,
+			Duration:    time.Since(start),
+			LogFilePath: logger.FilePath(),
+		}, nil
 	}
-	logger.Log("VALIDATION", fmt.Sprintf("Valid: %d, Rejected: %d", len(validProducts), len(rejectedProducts)))
 
-	// 6. Save products to DB
+	// 5. Save products to DB
 	savedCount := 0
-	for _, p := range validProducts {
+	for _, p := range orchResult.Products {
 		_, err := c.productStore.Create(ctx, shop.ID, crawl.ID, p.Name, p.Price, p.ImageURL, p.SourceURL)
 		if err != nil {
 			logger.Log("ERROR", fmt.Sprintf("Failed to save product %s: %v", p.Name, err))
@@ -232,12 +210,12 @@ func (c *Crawler) RunWithProgress(ctx context.Context, cfg CrawlConfig, sessionI
 		savedCount++
 	}
 
-	// 7. Update shop last_crawled_at
+	// 6. Update shop last_crawled_at
 	if err := c.shopStore.UpdateLastCrawled(ctx, shop.ID); err != nil {
 		logger.Log("ERROR", fmt.Sprintf("Failed to update shop last_crawled_at: %v", err))
 	}
 
-	// 8. Finish crawl record
+	// 7. Finish crawl record
 	duration := time.Since(start)
 	status := models.CrawlStatusCompleted
 	var errMsg *string
@@ -247,19 +225,22 @@ func (c *Crawler) RunWithProgress(ctx context.Context, cfg CrawlConfig, sessionI
 		logger.Log("ERROR", msg)
 	}
 
-	if err := c.crawlStore.Finish(ctx, crawl.ID, status, savedCount, pagesVisited, aiRequestsCount, errMsg); err != nil {
+	totalScrapes := orchResult.ScrapeCount + 1 // +1 for initial page scrape
+	if err := c.crawlStore.Finish(ctx, crawl.ID, status, savedCount, totalScrapes, orchResult.AIRequestCount, errMsg); err != nil {
 		logger.Log("ERROR", fmt.Sprintf("Failed to finish crawl record: %v", err))
 	}
 
-	logger.Log("FIRECRAWL_COMPLETE", fmt.Sprintf("Crawl complete: %d products, %d pages, %d AI requests, %v", savedCount, pagesVisited, aiRequestsCount, duration))
-	report("done", fmt.Sprintf("Crawl complete: %d products, %d pages", savedCount, pagesVisited))
+	logger.Log("ORCHESTRATOR_DONE", fmt.Sprintf("Crawl complete: %d products, %d scrapes, %d AI requests, %d tokens, %v",
+		savedCount, totalScrapes, orchResult.AIRequestCount, orchResult.TotalTokensUsed, duration))
+	report("done", fmt.Sprintf("Crawl complete: %d products, %d scrapes", savedCount, totalScrapes))
 
 	return &CrawlResult{
 		CrawlID:         crawl.ID,
 		ShopID:          shop.ID,
 		ProductsFound:   savedCount,
-		PagesVisited:    pagesVisited,
-		AIRequestsCount: aiRequestsCount,
+		ScrapeCount:     totalScrapes,
+		AIRequestsCount: orchResult.AIRequestCount,
+		TotalTokensUsed: orchResult.TotalTokensUsed,
 		Duration:        duration,
 		LogFilePath:     logger.FilePath(),
 	}, nil

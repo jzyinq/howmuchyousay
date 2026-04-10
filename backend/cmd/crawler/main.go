@@ -35,7 +35,8 @@ func main() {
 	}
 
 	if cfg.OpenAIAPIKey == "" {
-		fmt.Fprintln(os.Stderr, "Warning: OPENAI_API_KEY not set. AI extraction will not be available.")
+		fmt.Fprintln(os.Stderr, "Error: OPENAI_API_KEY must be set")
+		os.Exit(1)
 	}
 
 	// Run migrations
@@ -51,19 +52,16 @@ func main() {
 	defer pool.Close()
 
 	// Create components
-	fc, err := crawler.NewFirecrawlClient(cfg.FirecrawlAPIKey, cfg.FirecrawlAPIURL)
+	scraper, err := crawler.NewFirecrawlClient(cfg.FirecrawlAPIKey, cfg.FirecrawlAPIURL)
 	if err != nil {
 		log.Fatalf("Failed to create Firecrawl client: %v", err)
 	}
 
-	var aiClient crawler.AIClient
-	if cfg.OpenAIAPIKey != "" {
-		aiClient = crawler.NewOpenAIClient(cfg.OpenAIAPIKey, cfg.OpenAIModel, "")
-	}
+	orch := crawler.NewOrchestrator(cfg.OpenAIAPIKey, cfg.OpenAIModel, "", scraper)
 
 	c := crawler.New(
-		fc,
-		aiClient,
+		scraper,
+		orch,
 		store.NewShopStore(pool),
 		store.NewCrawlStore(pool),
 		store.NewProductStore(pool),
@@ -74,7 +72,7 @@ func main() {
 		URL:         *urlFlag,
 		Timeout:     *timeoutFlag,
 		MinProducts: *minProductsFlag,
-		MaxDepth:    cfg.FirecrawlMaxDepth,
+		MaxScrapes:  50,
 		Verbose:     *verboseFlag,
 	}
 
@@ -103,7 +101,7 @@ func main() {
 	fmt.Printf("  Shop ID:      %s\n", result.ShopID)
 	fmt.Printf("  Crawl ID:     %s\n", result.CrawlID)
 	fmt.Printf("  Products:     %d\n", result.ProductsFound)
-	fmt.Printf("  Pages:        %d\n", result.PagesVisited)
+	fmt.Printf("  Scrapes:      %d\n", result.ScrapeCount)
 	fmt.Printf("  AI requests:  %d\n", result.AIRequestsCount)
 	fmt.Printf("  Duration:     %s\n", result.Duration.Round(time.Millisecond))
 	fmt.Printf("  Log file:     %s\n", result.LogFilePath)

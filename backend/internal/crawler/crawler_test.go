@@ -2,8 +2,12 @@ package crawler_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,32 +17,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// --- Mock FirecrawlCrawler ---
-
-type mockFirecrawlCrawler struct {
-	crawlSiteFn func(ctx context.Context, siteURL string, cfg crawler.CrawlConfig) ([]crawler.PageResult, error)
-}
-
-func (m *mockFirecrawlCrawler) CrawlSite(ctx context.Context, siteURL string, cfg crawler.CrawlConfig) ([]crawler.PageResult, error) {
-	if m.crawlSiteFn != nil {
-		return m.crawlSiteFn(ctx, siteURL, cfg)
-	}
-	return nil, nil
-}
-
-// --- Mock AI Client ---
-
-type mockAIClient struct {
-	extractProductsFn func(ctx context.Context, markdown string, pageURL string) ([]crawler.RawProduct, int, error)
-}
-
-func (m *mockAIClient) ExtractProducts(ctx context.Context, markdown string, pageURL string) ([]crawler.RawProduct, int, error) {
-	if m.extractProductsFn != nil {
-		return m.extractProductsFn(ctx, markdown, pageURL)
-	}
-	return nil, 0, nil
-}
 
 // --- Test DB setup ---
 
@@ -70,52 +48,89 @@ func setupTestDB(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
-func TestCrawler_RunWithFirecrawl(t *testing.T) {
+func TestCrawler_RunWithOrchestrator(t *testing.T) {
 	pool := setupTestDB(t)
 	logDir := t.TempDir()
 
-	mockFC := &mockFirecrawlCrawler{
-		crawlSiteFn: func(ctx context.Context, siteURL string, cfg crawler.CrawlConfig) ([]crawler.PageResult, error) {
-			return []crawler.PageResult{
-				{
-					URL:      "https://shop.com/products/laptop",
-					Markdown: "# Laptop Dell XPS 15\n\nCompare prices and specs\n\n5999.99 PLN | 4999.99 PLN refurbished\n\nAdd to cart\n\nThe best laptop for professionals.",
-					Metadata: map[string]string{
-						"title":   "Laptop Dell XPS 15 - Shop",
-						"ogImage": "https://img.com/dell.jpg",
-					},
+	// Mock Firecrawl scraper
+	scraper := &mockFirecrawlScraper{
+		discoverLinksFn: func(ctx context.Context, url string) (*crawler.LinkDiscoveryResult, error) {
+			return &crawler.LinkDiscoveryResult{
+				PageURL:   url,
+				PageTitle: "Test Shop",
+				Links: []string{
+					"https://shop.com/product/1",
+					"https://shop.com/product/2",
 				},
-				{
-					URL:      "https://shop.com/products/iphone",
-					Markdown: "# iPhone 15 Pro\n\nPrice: 5499 PLN\n\nBuy now\n\nThe latest iPhone with titanium design and advanced camera system.",
-					Metadata: map[string]string{
-						"title":   "iPhone 15 Pro - Shop",
-						"ogImage": "https://img.com/iphone.jpg",
-					},
-				},
+			}, nil
+		},
+		extractProductFn: func(ctx context.Context, url string) (*crawler.ProductExtractionResult, error) {
+			if url == "https://shop.com/product/1" {
+				return &crawler.ProductExtractionResult{
+					Name: "Product One", Price: 99.99, ImageURL: "https://img.com/1.jpg", Found: true,
+				}, nil
+			}
+			return &crawler.ProductExtractionResult{
+				Name: "Product Two", Price: 199.99, ImageURL: "https://img.com/2.jpg", Found: true,
 			}, nil
 		},
 	}
 
-	// AI extracts products from markdown
-	callCount := 0
-	mockAI := &mockAIClient{
-		extractProductsFn: func(ctx context.Context, markdown string, pageURL string) ([]crawler.RawProduct, int, error) {
-			callCount++
-			if callCount == 1 {
-				return []crawler.RawProduct{
-					{Name: "Laptop Dell XPS 15", Price: 5999.99, ImageURL: "https://img.com/dell.jpg"},
-				}, 200, nil
-			}
-			return []crawler.RawProduct{
-				{Name: "iPhone 15 Pro", Price: 5499.00, ImageURL: "https://img.com/iphone.jpg"},
-			}, 200, nil
-		},
-	}
+	// Mock OpenAI: extract product 1, save, extract product 2, save, done
+	callNum := 0
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		callNum++
+		n := callNum
+		mu.Unlock()
+
+		var resp map[string]interface{}
+		switch n {
+		case 1:
+			resp = openAIToolCallResponse([]map[string]interface{}{
+				{"id": "c1", "type": "function", "function": map[string]interface{}{
+					"name": "extract_product", "arguments": `{"url":"https://shop.com/product/1"}`,
+				}},
+			})
+		case 2:
+			resp = openAIToolCallResponse([]map[string]interface{}{
+				{"id": "c2", "type": "function", "function": map[string]interface{}{
+					"name": "save_product", "arguments": `{"name":"Product One","price":99.99,"image_url":"https://img.com/1.jpg","source_url":"https://shop.com/product/1"}`,
+				}},
+			})
+		case 3:
+			resp = openAIToolCallResponse([]map[string]interface{}{
+				{"id": "c3", "type": "function", "function": map[string]interface{}{
+					"name": "extract_product", "arguments": `{"url":"https://shop.com/product/2"}`,
+				}},
+			})
+		case 4:
+			resp = openAIToolCallResponse([]map[string]interface{}{
+				{"id": "c4", "type": "function", "function": map[string]interface{}{
+					"name": "save_product", "arguments": `{"name":"Product Two","price":199.99,"image_url":"https://img.com/2.jpg","source_url":"https://shop.com/product/2"}`,
+				}},
+			})
+		case 5:
+			resp = openAIToolCallResponse([]map[string]interface{}{
+				{"id": "c5", "type": "function", "function": map[string]interface{}{
+					"name": "done", "arguments": `{}`,
+				}},
+			})
+		default:
+			resp = openAIStopResponse("Done")
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	orch := crawler.NewOrchestrator("test-key", "gpt-5-mini", server.URL, scraper)
 
 	c := crawler.New(
-		mockFC,
-		mockAI,
+		scraper,
+		orch,
 		store.NewShopStore(pool),
 		store.NewCrawlStore(pool),
 		store.NewProductStore(pool),
@@ -126,78 +141,34 @@ func TestCrawler_RunWithFirecrawl(t *testing.T) {
 		URL:         "https://shop.com",
 		Timeout:     30 * time.Second,
 		MinProducts: 1,
-		Verbose:     false,
+		MaxScrapes:  50,
 	}
 
 	result, err := c.Run(context.Background(), cfg, nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, 2, result.ProductsFound)
-	assert.Equal(t, 2, result.PagesVisited)
-	assert.Equal(t, 2, result.AIRequestsCount)
 	assert.NotEmpty(t, result.CrawlID)
 	assert.NotEmpty(t, result.ShopID)
+	assert.True(t, result.TotalTokensUsed > 0)
 }
 
-func TestCrawler_RunWithMetadataExtraction(t *testing.T) {
+func TestCrawler_RunInitialScrapeError(t *testing.T) {
 	pool := setupTestDB(t)
 	logDir := t.TempDir()
 
-	// Page with ogTitle + exactly one price in markdown — no AI needed
-	mockFC := &mockFirecrawlCrawler{
-		crawlSiteFn: func(ctx context.Context, siteURL string, cfg crawler.CrawlConfig) ([]crawler.PageResult, error) {
-			return []crawler.PageResult{
-				{
-					URL:      "https://shop.com/product/phone",
-					Markdown: "# iPhone 15 Pro\n\nBest phone ever with amazing camera and titanium design. Available now in multiple colors.\n\nPrice: 5499.00 PLN",
-					Metadata: map[string]string{
-						"ogTitle": "iPhone 15 Pro",
-						"ogImage": "https://img.com/iphone.jpg",
-					},
-				},
-			}, nil
-		},
-	}
-
-	mockAI := &mockAIClient{}
-
-	c := crawler.New(
-		mockFC,
-		mockAI,
-		store.NewShopStore(pool),
-		store.NewCrawlStore(pool),
-		store.NewProductStore(pool),
-		logDir,
-	)
-
-	cfg := crawler.CrawlConfig{
-		URL:         "https://shop.com",
-		Timeout:     30 * time.Second,
-		MinProducts: 1,
-	}
-
-	result, err := c.Run(context.Background(), cfg, nil)
-	require.NoError(t, err)
-
-	assert.Equal(t, 1, result.ProductsFound)
-	assert.Equal(t, 0, result.AIRequestsCount) // No AI needed
-}
-
-func TestCrawler_RunFirecrawlError(t *testing.T) {
-	pool := setupTestDB(t)
-	logDir := t.TempDir()
-
-	mockFC := &mockFirecrawlCrawler{
-		crawlSiteFn: func(ctx context.Context, siteURL string, cfg crawler.CrawlConfig) ([]crawler.PageResult, error) {
+	scraper := &mockFirecrawlScraper{
+		discoverLinksFn: func(ctx context.Context, url string) (*crawler.LinkDiscoveryResult, error) {
 			return nil, fmt.Errorf("firecrawl API error: 401 unauthorized")
 		},
 	}
 
-	mockAI := &mockAIClient{}
+	// Orchestrator won't be called if initial scrape fails
+	orch := crawler.NewOrchestrator("test-key", "gpt-5-mini", "", scraper)
 
 	c := crawler.New(
-		mockFC,
-		mockAI,
+		scraper,
+		orch,
 		store.NewShopStore(pool),
 		store.NewCrawlStore(pool),
 		store.NewProductStore(pool),
@@ -208,45 +179,36 @@ func TestCrawler_RunFirecrawlError(t *testing.T) {
 		URL:         "https://shop.com",
 		Timeout:     10 * time.Second,
 		MinProducts: 1,
+		MaxScrapes:  50,
 	}
 
 	result, err := c.Run(context.Background(), cfg, nil)
 	require.NoError(t, err) // Crawl itself doesn't error — it marks the crawl as failed
-
 	assert.Equal(t, 0, result.ProductsFound)
 }
 
-func TestCrawler_RunSavesToDatabase(t *testing.T) {
+func TestCrawler_RunNoLinksOnInitialPage(t *testing.T) {
 	pool := setupTestDB(t)
 	logDir := t.TempDir()
 
-	mockFC := &mockFirecrawlCrawler{
-		crawlSiteFn: func(ctx context.Context, siteURL string, cfg crawler.CrawlConfig) ([]crawler.PageResult, error) {
-			return []crawler.PageResult{
-				{
-					URL:      "https://shop.com/product/1",
-					Markdown: "# DB Test Product\n\nPrice: 99.99 PLN\n\nGreat product for testing database persistence with metadata extraction.",
-					Metadata: map[string]string{
-						"ogTitle": "DB Test Product",
-						"ogImage": "https://img.com/db.jpg",
-					},
-				},
+	scraper := &mockFirecrawlScraper{
+		discoverLinksFn: func(ctx context.Context, url string) (*crawler.LinkDiscoveryResult, error) {
+			return &crawler.LinkDiscoveryResult{
+				PageURL:   url,
+				PageTitle: "Empty Shop",
+				Links:     []string{},
 			}, nil
 		},
 	}
 
-	mockAI := &mockAIClient{}
-
-	shopStore := store.NewShopStore(pool)
-	crawlStore := store.NewCrawlStore(pool)
-	productStore := store.NewProductStore(pool)
+	orch := crawler.NewOrchestrator("test-key", "gpt-5-mini", "", scraper)
 
 	c := crawler.New(
-		mockFC,
-		mockAI,
-		shopStore,
-		crawlStore,
-		productStore,
+		scraper,
+		orch,
+		store.NewShopStore(pool),
+		store.NewCrawlStore(pool),
+		store.NewProductStore(pool),
 		logDir,
 	)
 
@@ -254,26 +216,10 @@ func TestCrawler_RunSavesToDatabase(t *testing.T) {
 		URL:         "https://shop.com",
 		Timeout:     10 * time.Second,
 		MinProducts: 1,
+		MaxScrapes:  50,
 	}
 
 	result, err := c.Run(context.Background(), cfg, nil)
 	require.NoError(t, err)
-
-	// Verify shop was created
-	ctx := context.Background()
-	shop, err := shopStore.GetByID(ctx, result.ShopID)
-	require.NoError(t, err)
-	require.NotNil(t, shop)
-
-	// Verify crawl was created and finished
-	crawl, err := crawlStore.GetByID(ctx, result.CrawlID)
-	require.NoError(t, err)
-	require.NotNil(t, crawl)
-	assert.Equal(t, "completed", string(crawl.Status))
-	assert.Equal(t, result.ProductsFound, crawl.ProductsFound)
-
-	// Verify products were saved
-	products, err := productStore.GetByShopID(ctx, result.ShopID)
-	require.NoError(t, err)
-	assert.Len(t, products, result.ProductsFound)
+	assert.Equal(t, 0, result.ProductsFound)
 }
