@@ -261,7 +261,7 @@ func (o *Orchestrator) handleDiscoverLinksIO(ctx context.Context, argsJSON strin
 		return fmt.Sprintf("Failed to fetch %s: %v", args.URL, err)
 	}
 
-	log("TOOL_RESULT", fmt.Sprintf("discover_links returned %d links for %s", len(result.Links), args.URL))
+	log("LINKS_FOUND", fmt.Sprintf("discover_links returned %d links for %s", len(result.Links), args.URL))
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Page: \"%s\"\n", result.PageTitle))
