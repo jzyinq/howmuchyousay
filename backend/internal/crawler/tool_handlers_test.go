@@ -1,6 +1,8 @@
 package crawler
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -127,4 +129,24 @@ func TestToolHandlers_HasReachedTarget(t *testing.T) {
 		h.SaveProduct(RawProduct{Name: "B", Price: 20, SourceURL: "https://shop.com/2"})
 		assert.True(t, h.HasReachedTarget())
 	})
+}
+
+func TestToolHandlers_ConcurrentSaveProduct(t *testing.T) {
+	h := NewToolHandlers(100)
+	var wg sync.WaitGroup
+
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			h.SaveProduct(RawProduct{
+				Name:      fmt.Sprintf("Product %d", i),
+				Price:     float64(10 + i),
+				SourceURL: fmt.Sprintf("https://shop.com/p/%d", i),
+			})
+		}(i)
+	}
+
+	wg.Wait()
+	assert.Equal(t, 20, len(h.SavedProducts()))
 }

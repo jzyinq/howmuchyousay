@@ -3,11 +3,13 @@ package crawler
 import (
 	"fmt"
 	"strings"
+	"sync"
 )
 
 // ToolHandlers manages crawl state for the orchestrator loop: visited URLs,
 // saved products, scrape count, and deduplication.
 type ToolHandlers struct {
+	mu            sync.Mutex
 	minProducts   int
 	savedProducts []RawProduct
 	seenNames     map[string]bool
@@ -28,6 +30,9 @@ func NewToolHandlers(minProducts int) *ToolHandlers {
 
 // SaveProduct validates and saves a product. Returns a status message for the orchestrator.
 func (h *ToolHandlers) SaveProduct(p RawProduct) string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
 	// Validate using existing validator (single-item slice)
 	valid, rejected := ValidateProducts([]RawProduct{p})
 	if len(rejected) > 0 {
@@ -66,6 +71,9 @@ func (h *ToolHandlers) SaveProduct(p RawProduct) string {
 
 // GetStatus returns the current crawl progress.
 func (h *ToolHandlers) GetStatus() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
 	if len(h.savedProducts) == 0 {
 		return fmt.Sprintf("Progress: 0/%d products. No products saved yet.", h.minProducts)
 	}
@@ -73,9 +81,13 @@ func (h *ToolHandlers) GetStatus() string {
 		len(h.savedProducts), h.minProducts, h.productNameList())
 }
 
-// SavedProducts returns all saved products.
+// SavedProducts returns a copy of all saved products.
 func (h *ToolHandlers) SavedProducts() []RawProduct {
-	return h.savedProducts
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]RawProduct, len(h.savedProducts))
+	copy(out, h.savedProducts)
+	return out
 }
 
 // MinProducts returns the target product count.
@@ -85,26 +97,36 @@ func (h *ToolHandlers) MinProducts() int {
 
 // IsVisited checks if a URL has already been scraped.
 func (h *ToolHandlers) IsVisited(url string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	return h.visitedURLs[url]
 }
 
 // MarkVisited records a URL as already scraped.
 func (h *ToolHandlers) MarkVisited(url string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.visitedURLs[url] = true
 }
 
 // ScrapeCount returns the number of Firecrawl scrape calls made.
 func (h *ToolHandlers) ScrapeCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	return h.scrapeCount
 }
 
 // IncrementScrapeCount increments the scrape call counter.
 func (h *ToolHandlers) IncrementScrapeCount() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.scrapeCount++
 }
 
 // HasReachedTarget returns true if we've saved enough products.
 func (h *ToolHandlers) HasReachedTarget() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	return len(h.savedProducts) >= h.minProducts
 }
 
