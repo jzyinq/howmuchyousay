@@ -76,6 +76,8 @@ services:
       BULL_AUTH_KEY: firecrawl-dev
       NUM_WORKERS_PER_QUEUE: 8
       ENV: local
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      TEST_API_KEY: ${FIRECRAWL_API_KEY}
     depends_on:
       firecrawl-redis:
         condition: service_started
@@ -83,6 +85,8 @@ services:
         condition: service_started
       firecrawl-rabbitmq:
         condition: service_healthy
+      firecrawl-postgres:
+        condition: service_started
     ports:
       - "3002:3002"
     networks:
