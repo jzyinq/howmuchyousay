@@ -30,6 +30,8 @@ type CrawlConfig struct {
 	MinProducts int
 	// MaxDepth is the maximum crawl depth for Firecrawl (0 uses default of 3).
 	MaxDepth int
+	// MaxScrapes is the safety cap on the number of Firecrawl scrape calls.
+	MaxScrapes int
 	// Verbose enables extra stdout output (for CLI mode).
 	Verbose bool
 }
