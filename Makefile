@@ -1,7 +1,7 @@
 .PHONY: dev test migrate-up migrate-down build
 
 dev:
-	docker compose up -d postgres
+	docker compose up -d postgres firecrawl
 	cd backend && go run ./cmd/server/
 
 test:

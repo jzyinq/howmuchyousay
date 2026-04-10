@@ -19,5 +19,81 @@ services:
     ports:
       - "5433:5432"
 
+  # --- Firecrawl self-hosted services ---
+
+  firecrawl-redis:
+    image: redis:alpine
+    command: redis-server --bind 0.0.0.0
+    networks:
+      - firecrawl
+
+  firecrawl-rabbitmq:
+    image: rabbitmq:3-management
+    command: rabbitmq-server
+    networks:
+      - firecrawl
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  firecrawl-postgres:
+    image: ghcr.io/firecrawl/nuq-postgres:latest
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    networks:
+      - firecrawl
+
+  firecrawl-playwright:
+    image: ghcr.io/firecrawl/playwright-service:latest
+    environment:
+      PORT: 3000
+      MAX_CONCURRENT_PAGES: 10
+    networks:
+      - firecrawl
+    cpus: 2.0
+    mem_limit: 4G
+
+  firecrawl:
+    image: ghcr.io/firecrawl/firecrawl:latest
+    environment:
+      PORT: 3002
+      HOST: 0.0.0.0
+      USE_DB_AUTHENTICATION: "false"
+      REDIS_URL: redis://firecrawl-redis:6379
+      REDIS_RATE_LIMIT_URL: redis://firecrawl-redis:6379
+      PLAYWRIGHT_MICROSERVICE_URL: http://firecrawl-playwright:3000/scrape
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_HOST: firecrawl-postgres
+      POSTGRES_PORT: "5432"
+      NUQ_RABBITMQ_URL: amqp://firecrawl-rabbitmq:5672
+      BULL_AUTH_KEY: firecrawl-dev
+      NUM_WORKERS_PER_QUEUE: 8
+      ENV: local
+    depends_on:
+      firecrawl-redis:
+        condition: service_started
+      firecrawl-playwright:
+        condition: service_started
+      firecrawl-rabbitmq:
+        condition: service_healthy
+    ports:
+      - "3002:3002"
+    networks:
+      - firecrawl
+    command: node dist/src/harness.js --start-docker
+    cpus: 4.0
+    mem_limit: 8G
+
 volumes:
   pgdata:
+
+networks:
+  firecrawl:
+    driver: bridge
