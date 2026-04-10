@@ -144,3 +144,77 @@ func TestGenerateComparisonRoundsDeterministic(t *testing.T) {
 		assert.Equal(t, rounds1[i].CorrectAnswer, rounds2[i].CorrectAnswer)
 	}
 }
+
+func TestGenerateGuessRounds(t *testing.T) {
+	rng := rand.New(rand.NewPCG(42, 0))
+
+	products := []models.Product{
+		makeProduct("Product A", 100.0),
+		makeProduct("Product B", 200.0),
+		makeProduct("Product C", 50.0),
+		makeProduct("Product D", 300.0),
+		makeProduct("Product E", 150.0),
+		makeProduct("Product F", 75.0),
+		makeProduct("Product G", 250.0),
+		makeProduct("Product H", 120.0),
+		makeProduct("Product I", 180.0),
+		makeProduct("Product J", 90.0),
+	}
+
+	rounds, err := GenerateGuessRounds(products, 5, rng)
+	require.NoError(t, err)
+	assert.Len(t, rounds, 5)
+
+	usedProductIDs := make(map[uuid.UUID]bool)
+	for i, r := range rounds {
+		// Round numbers are 1-indexed
+		assert.Equal(t, i+1, r.RoundNumber)
+		// Round type is guess
+		assert.Equal(t, models.RoundTypeGuess, r.RoundType)
+		// Product B is nil for guess rounds
+		assert.Nil(t, r.ProductB)
+		// Correct answer is the formatted price
+		assert.Equal(t, FormatCorrectGuessAnswer(r.ProductA.Price), r.CorrectAnswer)
+		// Difficulty score is 0 for guess rounds (points depend on player's answer)
+		assert.Equal(t, 0, r.DifficultyScore)
+		// No product reuse
+		assert.False(t, usedProductIDs[r.ProductA.ID], "product reused in round %d", i+1)
+		usedProductIDs[r.ProductA.ID] = true
+	}
+}
+
+func TestGenerateGuessRoundsNotEnoughProducts(t *testing.T) {
+	rng := rand.New(rand.NewPCG(42, 0))
+
+	// Need 5 rounds = 5 products, only have 3
+	products := []models.Product{
+		makeProduct("A", 100.0),
+		makeProduct("B", 200.0),
+		makeProduct("C", 50.0),
+	}
+
+	_, err := GenerateGuessRounds(products, 5, rng)
+	assert.ErrorIs(t, err, ErrNotEnoughProducts)
+}
+
+func TestGenerateGuessRoundsDeterministic(t *testing.T) {
+	products := []models.Product{
+		makeProduct("A", 100.0),
+		makeProduct("B", 200.0),
+		makeProduct("C", 50.0),
+		makeProduct("D", 300.0),
+		makeProduct("E", 150.0),
+	}
+
+	rng1 := rand.New(rand.NewPCG(99, 0))
+	rng2 := rand.New(rand.NewPCG(99, 0))
+
+	rounds1, err := GenerateGuessRounds(products, 3, rng1)
+	require.NoError(t, err)
+	rounds2, err := GenerateGuessRounds(products, 3, rng2)
+	require.NoError(t, err)
+
+	for i := range rounds1 {
+		assert.Equal(t, rounds1[i].ProductA.ID, rounds2[i].ProductA.ID)
+	}
+}

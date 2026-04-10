@@ -97,3 +97,38 @@ func GenerateComparisonRounds(products []models.Product, count int, rng *rand.Ra
 
 	return rounds, nil
 }
+
+// GenerateGuessRounds creates guess round definitions from a product pool.
+//
+// Each round uses a single product. No product is reused across rounds.
+// The correct answer is the product's price formatted as a string (e.g. "99.99").
+// DifficultyScore is 0 for guess rounds — points depend entirely on the player's answer accuracy.
+//
+// Requirements:
+//   - len(products) >= count
+func GenerateGuessRounds(products []models.Product, count int, rng *rand.Rand) ([]RoundDef, error) {
+	if len(products) < count {
+		return nil, ErrNotEnoughProducts
+	}
+
+	// Shuffle and pick the first `count` products
+	shuffled := make([]models.Product, len(products))
+	copy(shuffled, products)
+	rng.Shuffle(len(shuffled), func(i, j int) {
+		shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
+	})
+
+	rounds := make([]RoundDef, count)
+	for i := 0; i < count; i++ {
+		rounds[i] = RoundDef{
+			RoundNumber:     i + 1,
+			RoundType:       models.RoundTypeGuess,
+			ProductA:        shuffled[i],
+			ProductB:        nil,
+			CorrectAnswer:   FormatCorrectGuessAnswer(shuffled[i].Price),
+			DifficultyScore: 0,
+		}
+	}
+
+	return rounds, nil
+}
