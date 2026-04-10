@@ -279,3 +279,113 @@ func TestOrchestrator_SkipVisitedURLs(t *testing.T) {
 	// Scraper should NOT have been called since the URL was already visited (initial URL)
 	assert.False(t, scrapeCalled, "Firecrawl should not be called for already-visited URLs")
 }
+
+func TestOrchestrator_ParallelToolCalls(t *testing.T) {
+	callNum := 0
+	var mu sync.Mutex
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		callNum++
+		n := callNum
+		mu.Unlock()
+
+		var resp map[string]interface{}
+		switch n {
+		case 1:
+			// AI returns 3 extract_and_save_product calls at once
+			resp = openAIToolCallResponse([]map[string]interface{}{
+				{
+					"id":   "call_1",
+					"type": "function",
+					"function": map[string]interface{}{
+						"name":      "extract_and_save_product",
+						"arguments": `{"url":"https://shop.com/product/1"}`,
+					},
+				},
+				{
+					"id":   "call_2",
+					"type": "function",
+					"function": map[string]interface{}{
+						"name":      "extract_and_save_product",
+						"arguments": `{"url":"https://shop.com/product/2"}`,
+					},
+				},
+				{
+					"id":   "call_3",
+					"type": "function",
+					"function": map[string]interface{}{
+						"name":      "extract_and_save_product",
+						"arguments": `{"url":"https://shop.com/product/3"}`,
+					},
+				},
+			})
+		case 2:
+			resp = openAIToolCallResponse([]map[string]interface{}{
+				{
+					"id":   "call_done",
+					"type": "function",
+					"function": map[string]interface{}{
+						"name":      "done",
+						"arguments": `{}`,
+					},
+				},
+			})
+		default:
+			resp = openAIStopResponse("Done")
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	var extractMu sync.Mutex
+	extractedURLs := []string{}
+
+	scraper := &mockFirecrawlScraper{
+		extractProductFn: func(ctx context.Context, url string) (*crawler.ProductExtractionResult, error) {
+			// Simulate network delay to prove parallelism
+			time.Sleep(50 * time.Millisecond)
+			extractMu.Lock()
+			extractedURLs = append(extractedURLs, url)
+			extractMu.Unlock()
+			return &crawler.ProductExtractionResult{
+				Name:     "Product from " + url,
+				Price:    100.00,
+				ImageURL: "https://img.com/test.jpg",
+				Found:    true,
+			}, nil
+		},
+	}
+
+	initialLinks := &crawler.LinkDiscoveryResult{
+		PageURL:   "https://shop.com",
+		PageTitle: "Test Shop",
+		Links: []string{
+			"https://shop.com/product/1",
+			"https://shop.com/product/2",
+			"https://shop.com/product/3",
+		},
+	}
+
+	orch := crawler.NewOrchestrator("test-api-key", "gpt-5-mini", server.URL, scraper)
+	cfg := crawler.CrawlConfig{
+		URL:         "https://shop.com",
+		Timeout:     30 * time.Second,
+		MinProducts: 3,
+		MaxScrapes:  50,
+	}
+
+	start := time.Now()
+	result, err := orch.Run(context.Background(), initialLinks, cfg, nil)
+	elapsed := time.Since(start)
+
+	require.NoError(t, err)
+	assert.Len(t, result.Products, 3)
+	assert.Len(t, extractedURLs, 3)
+
+	// If parallel: 3 * 50ms should take ~50-80ms total, not 150ms+
+	// Use generous threshold to avoid flaky test, but catch sequential (150ms+)
+	assert.Less(t, elapsed, 500*time.Millisecond, "parallel execution should be faster than sequential")
+}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
@@ -24,6 +25,7 @@ type OrchestratorResult struct {
 }
 
 // OrchestratorLogger is an optional callback for logging orchestrator events.
+// Implementations must be safe for concurrent use — it may be called from multiple goroutines.
 type OrchestratorLogger func(event string, message string)
 
 // Orchestrator manages the AI-driven crawl loop using OpenAI function calling.
@@ -130,10 +132,9 @@ func (o *Orchestrator) Run(ctx context.Context, initialLinks *LinkDiscoveryResul
 		// Append the assistant message with tool calls
 		messages = append(messages, choice.Message.ToParam())
 
-		for _, toolCall := range choice.Message.ToolCalls {
-			result := o.handleToolCall(ctx, toolCall, handlers, log)
-			messages = append(messages, openai.ToolMessage(result, toolCall.ID))
-
+		results := o.dispatchToolCalls(ctx, choice.Message.ToolCalls, handlers, log)
+		for i, toolCall := range choice.Message.ToolCalls {
+			messages = append(messages, openai.ToolMessage(results[i], toolCall.ID))
 			if toolCall.Function.Name == "done" {
 				done = true
 			}
@@ -152,30 +153,70 @@ func (o *Orchestrator) Run(ctx context.Context, initialLinks *LinkDiscoveryResul
 	}, nil
 }
 
-// handleToolCall dispatches a tool call and returns the result string.
-func (o *Orchestrator) handleToolCall(ctx context.Context, tc openai.ChatCompletionMessageToolCallUnion, handlers *ToolHandlers, log OrchestratorLogger) string {
-	name := tc.Function.Name
-	args := tc.Function.Arguments
+// maxParallelScrapes is the concurrency limit for Firecrawl calls.
+const maxParallelScrapes = 5
 
-	log("TOOL_CALL", fmt.Sprintf("Tool call: %s(%s)", name, args))
+// isIOTool returns true for tools that make external HTTP calls (Firecrawl).
+func isIOTool(name string) bool {
+	return name == "extract_and_save_product" || name == "discover_links"
+}
 
-	var result string
+// dispatchToolCalls executes tool calls, running I/O-bound calls in parallel.
+// Returns results in the same order as the input tool calls.
+func (o *Orchestrator) dispatchToolCalls(
+	ctx context.Context,
+	toolCalls []openai.ChatCompletionMessageToolCallUnion,
+	handlers *ToolHandlers,
+	log OrchestratorLogger,
+) []string {
+	results := make([]string, len(toolCalls))
+	sem := make(chan struct{}, maxParallelScrapes)
+	var wg sync.WaitGroup
 
-	switch name {
-	case "discover_links":
-		result = o.handleDiscoverLinks(ctx, args, handlers, log)
-	case "extract_and_save_product":
-		result = o.handleExtractAndSaveProduct(ctx, args, handlers, log)
-	case "get_status":
-		result = handlers.GetStatus()
-	case "done":
-		result = "Crawl loop ended."
-	default:
-		result = fmt.Sprintf("Unknown tool: %s", name)
+	for i, tc := range toolCalls {
+		name := tc.Function.Name
+		args := tc.Function.Arguments
+
+		log("TOOL_CALL", fmt.Sprintf("Tool call: %s(%s)", name, args))
+
+		if isIOTool(name) {
+			wg.Add(1)
+			go func(idx int, tc openai.ChatCompletionMessageToolCallUnion) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+
+				var result string
+				switch tc.Function.Name {
+				case "discover_links":
+					result = o.handleDiscoverLinks(ctx, tc.Function.Arguments, handlers, log)
+				case "extract_and_save_product":
+					result = o.handleExtractAndSaveProduct(ctx, tc.Function.Arguments, handlers, log)
+				default:
+					result = fmt.Sprintf("Unknown IO tool: %s", tc.Function.Name)
+				}
+
+				log("TOOL_RESULT", fmt.Sprintf("%s result: %s", tc.Function.Name, truncateForLog(result, 200)))
+				results[idx] = result
+			}(i, tc)
+		} else {
+			// Local tools: execute inline
+			var result string
+			switch name {
+			case "get_status":
+				result = handlers.GetStatus()
+			case "done":
+				result = "Crawl loop ended."
+			default:
+				result = fmt.Sprintf("Unknown tool: %s", name)
+			}
+			log("TOOL_RESULT", fmt.Sprintf("%s result: %s", name, truncateForLog(result, 200)))
+			results[i] = result
+		}
 	}
 
-	log("TOOL_RESULT", fmt.Sprintf("%s result: %s", name, truncateForLog(result, 200)))
-	return result
+	wg.Wait()
+	return results
 }
 
 // handleDiscoverLinks processes a discover_links tool call.
