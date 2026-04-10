@@ -132,7 +132,7 @@ func (o *Orchestrator) Run(ctx context.Context, initialLinks *LinkDiscoveryResul
 		// Append the assistant message with tool calls
 		messages = append(messages, choice.Message.ToParam())
 
-		results := o.dispatchToolCalls(ctx, choice.Message.ToolCalls, handlers, log)
+		results := o.dispatchToolCalls(ctx, choice.Message.ToolCalls, handlers, cfg, log)
 		for i, toolCall := range choice.Message.ToolCalls {
 			messages = append(messages, openai.ToolMessage(results[i], toolCall.ID))
 			if toolCall.Function.Name == "done" {
@@ -162,11 +162,13 @@ func isIOTool(name string) bool {
 }
 
 // dispatchToolCalls executes tool calls, running I/O-bound calls in parallel.
+// Visited-URL and safety-cap checks are performed synchronously before launching goroutines.
 // Returns results in the same order as the input tool calls.
 func (o *Orchestrator) dispatchToolCalls(
 	ctx context.Context,
 	toolCalls []openai.ChatCompletionMessageToolCallUnion,
 	handlers *ToolHandlers,
+	cfg CrawlConfig,
 	log OrchestratorLogger,
 ) []string {
 	results := make([]string, len(toolCalls))
@@ -180,6 +182,30 @@ func (o *Orchestrator) dispatchToolCalls(
 		log("TOOL_CALL", fmt.Sprintf("Tool call: %s(%s)", name, args))
 
 		if isIOTool(name) {
+			// Parse URL from args
+			var urlArgs struct {
+				URL string `json:"url"`
+			}
+			if err := json.Unmarshal([]byte(args), &urlArgs); err != nil {
+				results[i] = fmt.Sprintf("Invalid arguments: %v", err)
+				continue
+			}
+
+			// Check visited synchronously (prevents two goroutines visiting same URL)
+			if handlers.IsVisited(urlArgs.URL) {
+				log("DUPLICATE_SKIP", fmt.Sprintf("Skipping already-visited URL: %s", urlArgs.URL))
+				results[i] = fmt.Sprintf("Already visited %s. Try a different page.", urlArgs.URL)
+				continue
+			}
+			handlers.MarkVisited(urlArgs.URL)
+
+			// Check safety cap synchronously
+			if !handlers.TryIncrementScrapeCount(cfg.MaxScrapes) {
+				log("SAFETY_CAP", fmt.Sprintf("Safety cap reached, skipping %s(%s)", name, args))
+				results[i] = fmt.Sprintf("Safety cap reached (%d scrapes). Cannot execute %s.", cfg.MaxScrapes, name)
+				continue
+			}
+
 			wg.Add(1)
 			go func(idx int, tc openai.ChatCompletionMessageToolCallUnion) {
 				defer wg.Done()
@@ -189,9 +215,9 @@ func (o *Orchestrator) dispatchToolCalls(
 				var result string
 				switch tc.Function.Name {
 				case "discover_links":
-					result = o.handleDiscoverLinks(ctx, tc.Function.Arguments, handlers, log)
+					result = o.handleDiscoverLinksIO(ctx, tc.Function.Arguments, log)
 				case "extract_and_save_product":
-					result = o.handleExtractAndSaveProduct(ctx, tc.Function.Arguments, handlers, log)
+					result = o.handleExtractAndSaveProductIO(ctx, tc.Function.Arguments, handlers, log)
 				default:
 					result = fmt.Sprintf("Unknown IO tool: %s", tc.Function.Name)
 				}
@@ -219,22 +245,15 @@ func (o *Orchestrator) dispatchToolCalls(
 	return results
 }
 
-// handleDiscoverLinks processes a discover_links tool call.
-func (o *Orchestrator) handleDiscoverLinks(ctx context.Context, argsJSON string, handlers *ToolHandlers, log OrchestratorLogger) string {
+// handleDiscoverLinksIO performs only the Firecrawl call and result formatting.
+// Visited-URL and scrape-count checks are done by dispatchToolCalls.
+func (o *Orchestrator) handleDiscoverLinksIO(ctx context.Context, argsJSON string, log OrchestratorLogger) string {
 	var args struct {
 		URL string `json:"url"`
 	}
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return fmt.Sprintf("Invalid arguments: %v", err)
 	}
-
-	if handlers.IsVisited(args.URL) {
-		log("DUPLICATE_SKIP", fmt.Sprintf("Skipping already-visited URL: %s", args.URL))
-		return fmt.Sprintf("Already visited %s. Try a different page.", args.URL)
-	}
-
-	handlers.MarkVisited(args.URL)
-	handlers.IncrementScrapeCount()
 
 	result, err := o.scraper.DiscoverLinks(ctx, args.URL)
 	if err != nil {
@@ -253,22 +272,15 @@ func (o *Orchestrator) handleDiscoverLinks(ctx context.Context, argsJSON string,
 	return sb.String()
 }
 
-// handleExtractAndSaveProduct extracts a product from a URL and saves it in one step.
-func (o *Orchestrator) handleExtractAndSaveProduct(ctx context.Context, argsJSON string, handlers *ToolHandlers, log OrchestratorLogger) string {
+// handleExtractAndSaveProductIO performs extraction + save without visited/count checks.
+// Visited-URL and scrape-count checks are done by dispatchToolCalls.
+func (o *Orchestrator) handleExtractAndSaveProductIO(ctx context.Context, argsJSON string, handlers *ToolHandlers, log OrchestratorLogger) string {
 	var args struct {
 		URL string `json:"url"`
 	}
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return fmt.Sprintf("Invalid arguments: %v", err)
 	}
-
-	if handlers.IsVisited(args.URL) {
-		log("DUPLICATE_SKIP", fmt.Sprintf("Skipping already-visited URL: %s", args.URL))
-		return fmt.Sprintf("Already visited %s. Try a different page.", args.URL)
-	}
-
-	handlers.MarkVisited(args.URL)
-	handlers.IncrementScrapeCount()
 
 	result, err := o.scraper.ExtractProduct(ctx, args.URL)
 	if err != nil {

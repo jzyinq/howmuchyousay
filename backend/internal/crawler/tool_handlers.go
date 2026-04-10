@@ -123,6 +123,18 @@ func (h *ToolHandlers) IncrementScrapeCount() {
 	h.scrapeCount++
 }
 
+// TryIncrementScrapeCount atomically checks the safety cap and increments if allowed.
+// Returns true if the increment was allowed, false if the cap was reached.
+func (h *ToolHandlers) TryIncrementScrapeCount(maxScrapes int) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.scrapeCount >= maxScrapes {
+		return false
+	}
+	h.scrapeCount++
+	return true
+}
+
 // HasReachedTarget returns true if we've saved enough products.
 func (h *ToolHandlers) HasReachedTarget() bool {
 	h.mu.Lock()

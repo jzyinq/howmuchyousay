@@ -389,3 +389,71 @@ func TestOrchestrator_ParallelToolCalls(t *testing.T) {
 	// Use generous threshold to avoid flaky test, but catch sequential (150ms+)
 	assert.Less(t, elapsed, 500*time.Millisecond, "parallel execution should be faster than sequential")
 }
+
+func TestOrchestrator_SafetyCapInParallelBatch(t *testing.T) {
+	callNum := 0
+	var mu sync.Mutex
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		callNum++
+		n := callNum
+		mu.Unlock()
+
+		var resp map[string]interface{}
+		switch n {
+		case 1:
+			// AI returns 5 extract calls, but safety cap is 3
+			calls := []map[string]interface{}{}
+			for i := 1; i <= 5; i++ {
+				calls = append(calls, map[string]interface{}{
+					"id":   fmt.Sprintf("call_%d", i),
+					"type": "function",
+					"function": map[string]interface{}{
+						"name":      "extract_and_save_product",
+						"arguments": fmt.Sprintf(`{"url":"https://shop.com/product/%d"}`, i),
+					},
+				})
+			}
+			resp = openAIToolCallResponse(calls)
+		default:
+			resp = openAIStopResponse("Done")
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	scraper := &mockFirecrawlScraper{
+		extractProductFn: func(ctx context.Context, url string) (*crawler.ProductExtractionResult, error) {
+			return &crawler.ProductExtractionResult{
+				Name:     "Product from " + url,
+				Price:    100.00,
+				ImageURL: "https://img.com/test.jpg",
+				Found:    true,
+			}, nil
+		},
+	}
+
+	initialLinks := &crawler.LinkDiscoveryResult{
+		PageURL:   "https://shop.com",
+		PageTitle: "Test Shop",
+		Links:     []string{"https://shop.com/product/1"},
+	}
+
+	orch := crawler.NewOrchestrator("test-api-key", "gpt-5-mini", server.URL, scraper)
+	cfg := crawler.CrawlConfig{
+		URL:         "https://shop.com",
+		Timeout:     30 * time.Second,
+		MinProducts: 20,
+		MaxScrapes:  3,
+	}
+
+	result, err := orch.Run(context.Background(), initialLinks, cfg, nil)
+	require.NoError(t, err)
+
+	// Exactly 3 products should be saved (safety cap = 3 scrapes, deterministic synchronous dispatch)
+	assert.Equal(t, 3, len(result.Products))
+	assert.Equal(t, 3, result.ScrapeCount)
+}
