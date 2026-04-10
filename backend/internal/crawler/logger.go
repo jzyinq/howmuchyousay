@@ -40,8 +40,8 @@ func NewCrawlLogger(logDir string, crawlID uuid.UUID) (*CrawlLogger, error) {
 
 // Log writes a structured log entry with timestamp and level to both the log
 // file and stdout.
-// Level should be one of: FETCH, PARSE, AI_REQUEST, AI_RESPONSE, NAVIGATE,
-// PRODUCT_FOUND, VALIDATION, ERROR.
+// Level should be one of: FIRECRAWL_START, FIRECRAWL_PROGRESS, FIRECRAWL_COMPLETE,
+// AI_REQUEST, AI_RESPONSE, PRODUCT_FOUND, VALIDATION, ERROR.
 func (l *CrawlLogger) Log(level string, message string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

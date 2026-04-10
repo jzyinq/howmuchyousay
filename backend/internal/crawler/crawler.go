@@ -13,7 +13,6 @@ import (
 )
 
 // RawProduct represents a product extracted from a web page before validation.
-// This is the intermediate format used by extractors and AI before persisting.
 type RawProduct struct {
 	Name      string  `json:"name"`
 	Price     float64 `json:"price"`
@@ -29,6 +28,8 @@ type CrawlConfig struct {
 	Timeout time.Duration
 	// MinProducts is the minimum number of products to collect.
 	MinProducts int
+	// MaxDepth is the maximum crawl depth for Firecrawl (0 uses default of 3).
+	MaxDepth int
 	// Verbose enables extra stdout output (for CLI mode).
 	Verbose bool
 }
@@ -44,7 +45,6 @@ func DefaultCrawlConfig(url string) CrawlConfig {
 }
 
 // ProgressFunc is called during crawling to report progress.
-// Used by CLI for stdout output and by server for WebSocket updates.
 type ProgressFunc func(event string, message string)
 
 // CrawlResult contains the outcome of a crawl run.
@@ -60,7 +60,7 @@ type CrawlResult struct {
 
 // Crawler orchestrates the product crawling pipeline.
 type Crawler struct {
-	fetcher      Fetcher
+	fc           FirecrawlCrawler
 	ai           AIClient
 	shopStore    *store.ShopStore
 	crawlStore   *store.CrawlStore
@@ -70,7 +70,7 @@ type Crawler struct {
 
 // New creates a new Crawler with all dependencies.
 func New(
-	fetcher Fetcher,
+	fc FirecrawlCrawler,
 	ai AIClient,
 	shopStore *store.ShopStore,
 	crawlStore *store.CrawlStore,
@@ -78,7 +78,7 @@ func New(
 	logDir string,
 ) *Crawler {
 	return &Crawler{
-		fetcher:      fetcher,
+		fc:           fc,
 		ai:           ai,
 		shopStore:    shopStore,
 		crawlStore:   crawlStore,
@@ -88,7 +88,6 @@ func New(
 }
 
 // Run executes the full crawl pipeline for the given config.
-// sessionID is optional (nil for CLI crawls, non-nil for game-triggered crawls).
 func (c *Crawler) Run(ctx context.Context, cfg CrawlConfig, sessionID *uuid.UUID) (*CrawlResult, error) {
 	return c.RunWithProgress(ctx, cfg, sessionID, nil)
 }
@@ -113,8 +112,7 @@ func (c *Crawler) RunWithProgress(ctx context.Context, cfg CrawlConfig, sessionI
 		return nil, fmt.Errorf("finding/creating shop: %w", err)
 	}
 
-	// 2. Create crawl record first to get the DB-generated ID,
-	// then create the logger with the actual crawl ID.
+	// 2. Create crawl record
 	crawl, err := c.crawlStore.Create(ctx, shop.ID, sessionID, "")
 	if err != nil {
 		return nil, fmt.Errorf("creating crawl record: %w", err)
@@ -126,33 +124,25 @@ func (c *Crawler) RunWithProgress(ctx context.Context, cfg CrawlConfig, sessionI
 	}
 	defer logger.Close()
 
-	// Save log file path back to crawl record
 	if err := c.crawlStore.UpdateLogPath(ctx, crawl.ID, logger.FilePath()); err != nil {
 		return nil, fmt.Errorf("updating crawl log path: %w", err)
 	}
 
-	// Update crawl status to in_progress
 	if err := c.crawlStore.UpdateStatus(ctx, crawl.ID, models.CrawlStatusInProgress); err != nil {
 		return nil, fmt.Errorf("updating crawl status: %w", err)
 	}
 
-	logger.Log("FETCH", fmt.Sprintf("Starting crawl for %s", cfg.URL))
+	logger.Log("FIRECRAWL_START", fmt.Sprintf("Starting Firecrawl job for %s", cfg.URL))
 	report("start", fmt.Sprintf("Starting crawl for %s", cfg.URL))
 
-	// 3. Check robots.txt
-	parsedURL, err := url.Parse(cfg.URL)
+	// 3. Run Firecrawl crawl
+	pages, err := c.fc.CrawlSite(ctx, cfg.URL, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("parsing URL: %w", err)
-	}
-
-	allowed, err := c.fetcher.CheckRobotsTxt(ctx, cfg.URL, parsedURL.Path)
-	if err != nil {
-		logger.Log("ERROR", fmt.Sprintf("Failed to check robots.txt: %v", err))
-	}
-	if !allowed {
-		errMsg := "crawling disallowed by robots.txt"
+		errMsg := fmt.Sprintf("Firecrawl error: %v", err)
 		logger.Log("ERROR", errMsg)
-		c.crawlStore.Finish(ctx, crawl.ID, models.CrawlStatusFailed, 0, 0, 0, &errMsg)
+		if finErr := c.crawlStore.Finish(ctx, crawl.ID, models.CrawlStatusFailed, 0, 0, 0, &errMsg); finErr != nil {
+			logger.Log("ERROR", fmt.Sprintf("Failed to finish crawl record: %v", finErr))
+		}
 		return &CrawlResult{
 			CrawlID:     crawl.ID,
 			ShopID:      shop.ID,
@@ -161,76 +151,53 @@ func (c *Crawler) RunWithProgress(ctx context.Context, cfg CrawlConfig, sessionI
 		}, nil
 	}
 
-	// 3.5 Try sitemap-based URL discovery
-	sitemapURLs, sitemapErr := FetchSitemapURLs(ctx, c.fetcher, cfg.URL)
-	if sitemapErr != nil {
-		logger.Log("FETCH", fmt.Sprintf("Sitemap fetch failed: %v", sitemapErr))
+	logger.Log("FIRECRAWL_COMPLETE", fmt.Sprintf("Firecrawl returned %d pages", len(pages)))
+	report("firecrawl_complete", fmt.Sprintf("Firecrawl returned %d pages", len(pages)))
+
+	if len(pages) == 0 {
+		errMsg := "Firecrawl returned 0 pages"
+		logger.Log("ERROR", errMsg)
+		if finErr := c.crawlStore.Finish(ctx, crawl.ID, models.CrawlStatusFailed, 0, 0, 0, &errMsg); finErr != nil {
+			logger.Log("ERROR", fmt.Sprintf("Failed to finish crawl record: %v", finErr))
+		}
+		return &CrawlResult{
+			CrawlID:     crawl.ID,
+			ShopID:      shop.ID,
+			Duration:    time.Since(start),
+			LogFilePath: logger.FilePath(),
+		}, nil
 	}
 
-	// 4. Crawl pages and collect products
+	// 4. Extract products from each page
 	var allProducts []RawProduct
 	pagesVisited := 0
 	aiRequestsCount := 0
-	visited := make(map[string]bool)
-	toVisit := []string{cfg.URL}
 
-	// Track which URLs came from the sitemap so we can skip AI extraction for them.
-	// Sitemap URLs already have a declared location - we trust structured data
-	// (JSON-LD / OpenGraph) to hold the product info rather than sending the full
-	// page HTML to the AI.
-	sitemapURLSet := make(map[string]bool)
-
-	if len(sitemapURLs) > 0 {
-		logger.Log("FETCH", fmt.Sprintf("Found %d URLs from sitemap", len(sitemapURLs)))
-		report("sitemap", fmt.Sprintf("Found %d URLs in sitemap", len(sitemapURLs)))
-		sampled := SampleURLs(sitemapURLs, 100)
-		logger.Log("FETCH", fmt.Sprintf("Sampled %d URLs from sitemap for crawling", len(sampled)))
-		for _, u := range sampled {
-			sitemapURLSet[u] = true
-		}
-		toVisit = append(sampled, toVisit...)
-	}
-
-	for len(toVisit) > 0 && len(allProducts) < cfg.MinProducts*2 {
-		// Check context (timeout)
+	for i, page := range pages {
 		if ctx.Err() != nil {
-			logger.Log("FETCH", "Timeout reached, stopping crawl")
+			logger.Log("ERROR", "Timeout reached during product extraction")
 			break
 		}
 
-		currentURL := toVisit[0]
-		toVisit = toVisit[1:]
-
-		if visited[currentURL] {
-			continue
-		}
-		visited[currentURL] = true
-
-		fromSitemap := sitemapURLSet[currentURL]
-
-		// Fetch page
-		html, err := c.fetcher.Fetch(ctx, currentURL)
-		if err != nil {
-			logger.Log("ERROR", fmt.Sprintf("Failed to fetch %s: %v", currentURL, err))
+		if !PageHasContent(page) {
 			continue
 		}
 		pagesVisited++
-		logger.Log("FETCH", fmt.Sprintf("Fetched %s, %d bytes", currentURL, len(html)))
-		report("fetch", fmt.Sprintf("Page %d: %s (%d bytes)", pagesVisited, currentURL, len(html)))
 
-		// Try structured data extraction first (JSON-LD / OpenGraph).
-		products := ExtractProducts(html, currentURL)
+		report("extract", fmt.Sprintf("Processing page %d/%d: %s", i+1, len(pages), page.URL))
+
+		// Try metadata-based extraction first (OG product data)
+		products := ExtractProductsFromPage(page)
 		if len(products) > 0 {
-			logger.Log("PARSE", fmt.Sprintf("Found %d products via structured data on %s", len(products), currentURL))
+			logger.Log("PRODUCT_FOUND", fmt.Sprintf("Found %d products via metadata on %s", len(products), page.URL))
 		}
 
-		// For sitemap-sourced URLs we rely solely on structured data; AI extraction
-		// is only used for pages discovered by crawling.
-		if len(products) == 0 && !fromSitemap && c.ai != nil {
-			logger.Log("AI_REQUEST", fmt.Sprintf("No structured data on %s, sending to AI", currentURL))
-			aiProducts, tokensUsed, err := c.ai.ExtractProducts(ctx, html, currentURL)
+		// If no products from metadata and page has product signals, use AI
+		if len(products) == 0 && c.ai != nil && HasProductSignals(page) {
+			logger.Log("AI_REQUEST", fmt.Sprintf("Sending markdown to AI for %s", page.URL))
+			aiProducts, tokensUsed, err := c.ai.ExtractProducts(ctx, page.Markdown, page.URL)
 			if err != nil {
-				logger.Log("ERROR", fmt.Sprintf("AI extraction failed for %s: %v", currentURL, err))
+				logger.Log("ERROR", fmt.Sprintf("AI extraction failed for %s: %v", page.URL, err))
 			} else {
 				aiRequestsCount++
 				logger.Log("AI_RESPONSE", fmt.Sprintf("AI found %d products, used %d tokens", len(aiProducts), tokensUsed))
@@ -238,56 +205,11 @@ func (c *Crawler) RunWithProgress(ctx context.Context, cfg CrawlConfig, sessionI
 			}
 		}
 
-		// Log found products
 		for _, p := range products {
 			logger.Log("PRODUCT_FOUND", fmt.Sprintf("Product: %s, Price: %.2f", p.Name, p.Price))
 		}
 		allProducts = append(allProducts, products...)
 		report("products", fmt.Sprintf("Total products so far: %d", len(allProducts)))
-
-		// If we have enough products, stop
-		if len(allProducts) >= cfg.MinProducts*2 {
-			break
-		}
-
-		// Discover more links
-		pageLinks := ExtractLinks(html, currentURL)
-
-		// Filter to same-host links only
-		var sameHostLinks []string
-		for _, link := range pageLinks {
-			linkParsed, err := url.Parse(link)
-			if err != nil {
-				continue
-			}
-			if linkParsed.Host == parsedURL.Host && !visited[link] {
-				sameHostLinks = append(sameHostLinks, link)
-			}
-		}
-
-		// If few same-host links found, ask AI for guidance
-		if len(sameHostLinks) < 3 && c.ai != nil && len(allProducts) < cfg.MinProducts {
-			aiLinks, tokensUsed, err := c.ai.ExtractLinks(ctx, html, cfg.URL)
-			if err != nil {
-				logger.Log("ERROR", fmt.Sprintf("AI link extraction failed: %v", err))
-			} else {
-				aiRequestsCount++
-				logger.Log("NAVIGATE", fmt.Sprintf("AI suggested %d links, used %d tokens", len(aiLinks), tokensUsed))
-				for _, link := range aiLinks {
-					// Resolve relative links
-					resolved, err := parsedURL.Parse(link)
-					if err != nil {
-						continue
-					}
-					fullURL := resolved.String()
-					if !visited[fullURL] {
-						sameHostLinks = append(sameHostLinks, fullURL)
-					}
-				}
-			}
-		}
-
-		toVisit = append(toVisit, sameHostLinks...)
 	}
 
 	// 5. Validate and deduplicate
@@ -318,7 +240,6 @@ func (c *Crawler) RunWithProgress(ctx context.Context, cfg CrawlConfig, sessionI
 	status := models.CrawlStatusCompleted
 	var errMsg *string
 	if savedCount < cfg.MinProducts {
-		status = models.CrawlStatusCompleted // Still completed, just with fewer products
 		msg := fmt.Sprintf("found only %d products (minimum: %d)", savedCount, cfg.MinProducts)
 		errMsg = &msg
 		logger.Log("ERROR", msg)
@@ -328,7 +249,7 @@ func (c *Crawler) RunWithProgress(ctx context.Context, cfg CrawlConfig, sessionI
 		logger.Log("ERROR", fmt.Sprintf("Failed to finish crawl record: %v", err))
 	}
 
-	logger.Log("FETCH", fmt.Sprintf("Crawl complete: %d products, %d pages, %d AI requests, %v", savedCount, pagesVisited, aiRequestsCount, duration))
+	logger.Log("FIRECRAWL_COMPLETE", fmt.Sprintf("Crawl complete: %d products, %d pages, %d AI requests, %v", savedCount, pagesVisited, aiRequestsCount, duration))
 	report("done", fmt.Sprintf("Crawl complete: %d products, %d pages", savedCount, pagesVisited))
 
 	return &CrawlResult{
@@ -358,14 +279,12 @@ func (c *Crawler) findOrCreateShop(ctx context.Context, rawURL string) (*models.
 }
 
 // normalizeShopURL normalizes a shop URL to a canonical form.
-// Strips trailing slashes, lowercases the host, removes query/fragment.
 func normalizeShopURL(rawURL string) string {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return rawURL
 	}
 
-	// Keep scheme and host only for the base URL
 	normalized := fmt.Sprintf("%s://%s", parsed.Scheme, strings.ToLower(parsed.Host))
 	return normalized
 }

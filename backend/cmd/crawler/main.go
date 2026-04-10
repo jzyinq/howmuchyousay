@@ -29,6 +29,11 @@ func main() {
 
 	cfg := config.Load()
 
+	if cfg.FirecrawlAPIKey == "" {
+		fmt.Fprintln(os.Stderr, "Error: FIRECRAWL_API_KEY must be set")
+		os.Exit(1)
+	}
+
 	if cfg.OpenAIAPIKey == "" {
 		fmt.Fprintln(os.Stderr, "Warning: OPENAI_API_KEY not set. AI extraction will not be available.")
 	}
@@ -46,7 +51,10 @@ func main() {
 	defer pool.Close()
 
 	// Create components
-	fetcher := crawler.NewHTTPFetcher(*timeoutFlag)
+	fc, err := crawler.NewFirecrawlClient(cfg.FirecrawlAPIKey, cfg.FirecrawlAPIURL)
+	if err != nil {
+		log.Fatalf("Failed to create Firecrawl client: %v", err)
+	}
 
 	var aiClient crawler.AIClient
 	if cfg.OpenAIAPIKey != "" {
@@ -54,7 +62,7 @@ func main() {
 	}
 
 	c := crawler.New(
-		fetcher,
+		fc,
 		aiClient,
 		store.NewShopStore(pool),
 		store.NewCrawlStore(pool),
@@ -66,6 +74,7 @@ func main() {
 		URL:         *urlFlag,
 		Timeout:     *timeoutFlag,
 		MinProducts: *minProductsFlag,
+		MaxDepth:    cfg.FirecrawlMaxDepth,
 		Verbose:     *verboseFlag,
 	}
 
@@ -73,6 +82,7 @@ func main() {
 		fmt.Printf("Starting crawl of %s\n", *urlFlag)
 		fmt.Printf("  Timeout: %s\n", *timeoutFlag)
 		fmt.Printf("  Min products: %d\n", *minProductsFlag)
+		fmt.Printf("  Firecrawl API: %s\n", cfg.FirecrawlAPIURL)
 		fmt.Println()
 	}
 

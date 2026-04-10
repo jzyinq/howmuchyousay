@@ -12,12 +12,9 @@ import (
 
 // AIClient is the interface for AI-powered product extraction.
 type AIClient interface {
-	// ExtractProducts sends HTML to AI and gets structured product data back.
+	// ExtractProducts sends page markdown to AI and gets structured product data back.
 	// Returns products, tokens used, and error.
-	ExtractProducts(ctx context.Context, html string, pageURL string) ([]RawProduct, int, error)
-	// ExtractLinks sends HTML to AI and gets promising product/category links.
-	// Returns link paths, tokens used, and error.
-	ExtractLinks(ctx context.Context, html string, baseURL string) ([]string, int, error)
+	ExtractProducts(ctx context.Context, markdown string, pageURL string) ([]RawProduct, int, error)
 }
 
 // OpenAIClient implements AIClient using the official OpenAI Go SDK.
@@ -44,10 +41,17 @@ func NewOpenAIClient(apiKey string, model string, baseURL string) *OpenAIClient 
 	}
 }
 
-func (c *OpenAIClient) ExtractProducts(ctx context.Context, html string, pageURL string) ([]RawProduct, int, error) {
-	truncatedHTML := truncateHTML(html, 100000)
+// maxMarkdownChars is the maximum markdown content length sent to the AI.
+// Firecrawl markdown is typically much smaller than raw HTML, but we still
+// cap it to avoid exceeding token limits or incurring unnecessary cost.
+const maxMarkdownChars = 50000
 
-	prompt := fmt.Sprintf(`You are a product data extractor. Analyze the following HTML from %s and extract product information.
+func (c *OpenAIClient) ExtractProducts(ctx context.Context, markdown string, pageURL string) ([]RawProduct, int, error) {
+	if len([]rune(markdown)) > maxMarkdownChars {
+		markdown = string([]rune(markdown)[:maxMarkdownChars])
+	}
+
+	prompt := fmt.Sprintf(`You are a product data extractor. Analyze the following markdown content from %s and extract product information.
 
 Return a JSON array of products. Each product should have:
 - "name": product name (string)
@@ -56,8 +60,8 @@ Return a JSON array of products. Each product should have:
 
 Return ONLY the JSON array, no other text. If no products are found, return an empty array [].
 
-HTML:
-%s`, pageURL, truncatedHTML)
+Markdown:
+%s`, pageURL, markdown)
 
 	completion, err := c.client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
 		Messages: []openai.ChatCompletionMessageParamUnion{
@@ -90,54 +94,6 @@ HTML:
 	}
 
 	return products, tokensUsed, nil
-}
-
-func (c *OpenAIClient) ExtractLinks(ctx context.Context, html string, baseURL string) ([]string, int, error) {
-	truncatedHTML := truncateHTML(html, 100000)
-
-	prompt := fmt.Sprintf(`You are a web crawler assistant. Analyze the following HTML from %s and identify links that likely lead to:
-1. Product pages (individual products with prices)
-2. Product category/listing pages (containing multiple products)
-
-Return a JSON array of URL paths (relative or absolute). Focus on links that are most likely to contain product data.
-Return ONLY the JSON array, no other text. Return at most 20 links. If no relevant links found, return [].
-
-HTML:
-%s`, baseURL, truncatedHTML)
-
-	completion, err := c.client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
-		Messages: []openai.ChatCompletionMessageParamUnion{
-			openai.UserMessage(prompt),
-		},
-		Model: c.model,
-	})
-	if err != nil {
-		return nil, 0, fmt.Errorf("OpenAI API error: %w", err)
-	}
-
-	tokensUsed := int(completion.Usage.TotalTokens)
-
-	if len(completion.Choices) == 0 {
-		return nil, tokensUsed, fmt.Errorf("no choices in API response")
-	}
-
-	content := completion.Choices[0].Message.Content
-
-	var links []string
-	cleaned := cleanJSONResponse(content)
-	if err := json.Unmarshal([]byte(cleaned), &links); err != nil {
-		return nil, tokensUsed, nil
-	}
-
-	return links, tokensUsed, nil
-}
-
-// truncateHTML truncates HTML content to maxChars characters.
-func truncateHTML(html string, maxChars int) string {
-	if len(html) <= maxChars {
-		return html
-	}
-	return html[:maxChars]
 }
 
 // cleanJSONResponse strips markdown code fences from AI response if present.

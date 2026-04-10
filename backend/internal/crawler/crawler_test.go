@@ -3,8 +3,6 @@ package crawler_test
 import (
 	"context"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
@@ -16,23 +14,28 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// --- Mock FirecrawlCrawler ---
+
+type mockFirecrawlCrawler struct {
+	crawlSiteFn func(ctx context.Context, siteURL string, cfg crawler.CrawlConfig) ([]crawler.PageResult, error)
+}
+
+func (m *mockFirecrawlCrawler) CrawlSite(ctx context.Context, siteURL string, cfg crawler.CrawlConfig) ([]crawler.PageResult, error) {
+	if m.crawlSiteFn != nil {
+		return m.crawlSiteFn(ctx, siteURL, cfg)
+	}
+	return nil, nil
+}
+
 // --- Mock AI Client ---
 
 type mockAIClient struct {
-	extractProductsFn func(ctx context.Context, html string, pageURL string) ([]crawler.RawProduct, int, error)
-	extractLinksFn    func(ctx context.Context, html string, baseURL string) ([]string, int, error)
+	extractProductsFn func(ctx context.Context, markdown string, pageURL string) ([]crawler.RawProduct, int, error)
 }
 
-func (m *mockAIClient) ExtractProducts(ctx context.Context, html string, pageURL string) ([]crawler.RawProduct, int, error) {
+func (m *mockAIClient) ExtractProducts(ctx context.Context, markdown string, pageURL string) ([]crawler.RawProduct, int, error) {
 	if m.extractProductsFn != nil {
-		return m.extractProductsFn(ctx, html, pageURL)
-	}
-	return nil, 0, nil
-}
-
-func (m *mockAIClient) ExtractLinks(ctx context.Context, html string, baseURL string) ([]string, int, error) {
-	if m.extractLinksFn != nil {
-		return m.extractLinksFn(ctx, html, baseURL)
+		return m.extractProductsFn(ctx, markdown, pageURL)
 	}
 	return nil, 0, nil
 }
@@ -67,71 +70,51 @@ func setupTestDB(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
-func TestCrawler_RunWithStructuredData(t *testing.T) {
-	// HTTP server that serves pages with JSON-LD product data
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/robots.txt":
-			w.Write([]byte("User-agent: *\nAllow: /\n"))
-		case "/":
-			w.Write([]byte(`<html><head>
-				<script type="application/ld+json">
-				[
-					{"@type":"Product","name":"Product 1","offers":{"price":"100.00"},"image":"https://img.com/1.jpg"},
-					{"@type":"Product","name":"Product 2","offers":{"price":"200.00"},"image":"https://img.com/2.jpg"},
-					{"@type":"Product","name":"Product 3","offers":{"price":"300.00"},"image":"https://img.com/3.jpg"},
-					{"@type":"Product","name":"Product 4","offers":{"price":"400.00"},"image":"https://img.com/4.jpg"},
-					{"@type":"Product","name":"Product 5","offers":{"price":"500.00"},"image":"https://img.com/5.jpg"}
-				]
-				</script>
-				</head><body>
-				<a href="/page2">Page 2</a>
-				</body></html>`))
-		case "/page2":
-			w.Write([]byte(`<html><head>
-				<script type="application/ld+json">
-				[
-					{"@type":"Product","name":"Product 6","offers":{"price":"600.00"},"image":"https://img.com/6.jpg"},
-					{"@type":"Product","name":"Product 7","offers":{"price":"700.00"},"image":"https://img.com/7.jpg"},
-					{"@type":"Product","name":"Product 8","offers":{"price":"800.00"},"image":"https://img.com/8.jpg"},
-					{"@type":"Product","name":"Product 9","offers":{"price":"900.00"},"image":"https://img.com/9.jpg"},
-					{"@type":"Product","name":"Product 10","offers":{"price":"1000.00"},"image":"https://img.com/10.jpg"}
-				]
-				</script>
-				</head><body>
-				<a href="/page3">Page 3</a>
-				</body></html>`))
-		case "/page3":
-			// Generate enough products to hit minProducts=20
-			products := ""
-			for i := 11; i <= 25; i++ {
-				products += fmt.Sprintf(
-					`{"@type":"Product","name":"Product %d","offers":{"price":"%d.00"},"image":"https://img.com/%d.jpg"},`,
-					i, i*100, i)
-			}
-			// Remove trailing comma
-			products = products[:len(products)-1]
-			w.Write([]byte(fmt.Sprintf(`<html><head>
-				<script type="application/ld+json">[%s]</script>
-				</head><body></body></html>`, products)))
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer server.Close()
-
+func TestCrawler_RunWithFirecrawl(t *testing.T) {
 	pool := setupTestDB(t)
 	logDir := t.TempDir()
 
+	mockFC := &mockFirecrawlCrawler{
+		crawlSiteFn: func(ctx context.Context, siteURL string, cfg crawler.CrawlConfig) ([]crawler.PageResult, error) {
+			return []crawler.PageResult{
+				{
+					URL:      "https://shop.com/products/laptop",
+					Markdown: "# Laptop Dell XPS 15\n\nCompare prices and specs\n\n5999.99 PLN | 4999.99 PLN refurbished\n\nAdd to cart\n\nThe best laptop for professionals.",
+					Metadata: map[string]string{
+						"title":   "Laptop Dell XPS 15 - Shop",
+						"ogImage": "https://img.com/dell.jpg",
+					},
+				},
+				{
+					URL:      "https://shop.com/products/iphone",
+					Markdown: "# iPhone 15 Pro\n\nPrice: 5499 PLN\n\nBuy now\n\nThe latest iPhone with titanium design and advanced camera system.",
+					Metadata: map[string]string{
+						"title":   "iPhone 15 Pro - Shop",
+						"ogImage": "https://img.com/iphone.jpg",
+					},
+				},
+			}, nil
+		},
+	}
+
+	// AI extracts products from markdown
+	callCount := 0
 	mockAI := &mockAIClient{
-		extractLinksFn: func(ctx context.Context, html string, baseURL string) ([]string, int, error) {
-			// AI suggests links if structured data didn't yield enough
-			return []string{"/page2", "/page3"}, 100, nil
+		extractProductsFn: func(ctx context.Context, markdown string, pageURL string) ([]crawler.RawProduct, int, error) {
+			callCount++
+			if callCount == 1 {
+				return []crawler.RawProduct{
+					{Name: "Laptop Dell XPS 15", Price: 5999.99, ImageURL: "https://img.com/dell.jpg"},
+				}, 200, nil
+			}
+			return []crawler.RawProduct{
+				{Name: "iPhone 15 Pro", Price: 5499.00, ImageURL: "https://img.com/iphone.jpg"},
+			}, 200, nil
 		},
 	}
 
 	c := crawler.New(
-		crawler.NewHTTPFetcher(5*time.Second),
+		mockFC,
 		mockAI,
 		store.NewShopStore(pool),
 		store.NewCrawlStore(pool),
@@ -140,70 +123,46 @@ func TestCrawler_RunWithStructuredData(t *testing.T) {
 	)
 
 	cfg := crawler.CrawlConfig{
-		URL:         server.URL,
+		URL:         "https://shop.com",
 		Timeout:     30 * time.Second,
-		MinProducts: 20,
+		MinProducts: 1,
 		Verbose:     false,
 	}
 
 	result, err := c.Run(context.Background(), cfg, nil)
 	require.NoError(t, err)
 
-	assert.GreaterOrEqual(t, result.ProductsFound, 20)
-	assert.Greater(t, result.PagesVisited, 0)
+	assert.Equal(t, 2, result.ProductsFound)
+	assert.Equal(t, 2, result.PagesVisited)
+	assert.Equal(t, 2, result.AIRequestsCount)
 	assert.NotEmpty(t, result.CrawlID)
 	assert.NotEmpty(t, result.ShopID)
 }
 
-func TestCrawler_RunWithAIFallback(t *testing.T) {
-	// HTTP server with NO structured data - requires AI extraction
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/robots.txt":
-			w.WriteHeader(http.StatusNotFound)
-		case "/":
-			w.Write([]byte(`<html><body>
-				<h1>Shop Products</h1>
-				<div class="product"><span>Laptop Dell</span><span>5999 PLN</span></div>
-				<div class="product"><span>iPhone 15</span><span>4999 PLN</span></div>
-				<a href="/page2">More products</a>
-				</body></html>`))
-		case "/page2":
-			w.Write([]byte(`<html><body>
-				<div class="product"><span>Samsung Galaxy</span><span>3999 PLN</span></div>
-				</body></html>`))
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer server.Close()
-
+func TestCrawler_RunWithMetadataExtraction(t *testing.T) {
 	pool := setupTestDB(t)
 	logDir := t.TempDir()
 
-	callCount := 0
-	mockAI := &mockAIClient{
-		extractProductsFn: func(ctx context.Context, html string, pageURL string) ([]crawler.RawProduct, int, error) {
-			callCount++
-			// Generate 12 unique products per page to exceed minProducts
-			var products []crawler.RawProduct
-			base := (callCount - 1) * 12
-			for i := 0; i < 12; i++ {
-				products = append(products, crawler.RawProduct{
-					Name:     fmt.Sprintf("AI Product %d", base+i+1),
-					Price:    float64((base+i+1)*100) + 0.99,
-					ImageURL: fmt.Sprintf("https://img.com/ai-%d.jpg", base+i+1),
-				})
-			}
-			return products, 300, nil
-		},
-		extractLinksFn: func(ctx context.Context, html string, baseURL string) ([]string, int, error) {
-			return []string{"/page2"}, 100, nil
+	// Page with ogTitle + exactly one price in markdown — no AI needed
+	mockFC := &mockFirecrawlCrawler{
+		crawlSiteFn: func(ctx context.Context, siteURL string, cfg crawler.CrawlConfig) ([]crawler.PageResult, error) {
+			return []crawler.PageResult{
+				{
+					URL:      "https://shop.com/product/phone",
+					Markdown: "# iPhone 15 Pro\n\nBest phone ever with amazing camera and titanium design. Available now in multiple colors.\n\nPrice: 5499.00 PLN",
+					Metadata: map[string]string{
+						"ogTitle": "iPhone 15 Pro",
+						"ogImage": "https://img.com/iphone.jpg",
+					},
+				},
+			}, nil
 		},
 	}
 
+	mockAI := &mockAIClient{}
+
 	c := crawler.New(
-		crawler.NewHTTPFetcher(5*time.Second),
+		mockFC,
 		mockAI,
 		store.NewShopStore(pool),
 		store.NewCrawlStore(pool),
@@ -212,44 +171,32 @@ func TestCrawler_RunWithAIFallback(t *testing.T) {
 	)
 
 	cfg := crawler.CrawlConfig{
-		URL:         server.URL,
+		URL:         "https://shop.com",
 		Timeout:     30 * time.Second,
-		MinProducts: 20,
-		Verbose:     false,
+		MinProducts: 1,
 	}
 
 	result, err := c.Run(context.Background(), cfg, nil)
 	require.NoError(t, err)
 
-	assert.GreaterOrEqual(t, result.ProductsFound, 20)
-	assert.Greater(t, result.AIRequestsCount, 0)
+	assert.Equal(t, 1, result.ProductsFound)
+	assert.Equal(t, 0, result.AIRequestsCount) // No AI needed
 }
 
-func TestCrawler_RunRespectsTimeout(t *testing.T) {
-	// HTTP server that responds slowly
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/robots.txt" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		time.Sleep(100 * time.Millisecond)
-		w.Write([]byte(`<html><body>
-			<a href="/page2">next</a>
-			</body></html>`))
-	}))
-	defer server.Close()
-
+func TestCrawler_RunFirecrawlError(t *testing.T) {
 	pool := setupTestDB(t)
 	logDir := t.TempDir()
 
-	mockAI := &mockAIClient{
-		extractLinksFn: func(ctx context.Context, html string, baseURL string) ([]string, int, error) {
-			return []string{"/page2"}, 100, nil
+	mockFC := &mockFirecrawlCrawler{
+		crawlSiteFn: func(ctx context.Context, siteURL string, cfg crawler.CrawlConfig) ([]crawler.PageResult, error) {
+			return nil, fmt.Errorf("firecrawl API error: 401 unauthorized")
 		},
 	}
 
+	mockAI := &mockAIClient{}
+
 	c := crawler.New(
-		crawler.NewHTTPFetcher(5*time.Second),
+		mockFC,
 		mockAI,
 		store.NewShopStore(pool),
 		store.NewCrawlStore(pool),
@@ -258,38 +205,35 @@ func TestCrawler_RunRespectsTimeout(t *testing.T) {
 	)
 
 	cfg := crawler.CrawlConfig{
-		URL:         server.URL,
-		Timeout:     500 * time.Millisecond,
-		MinProducts: 100, // Impossible to reach
-		Verbose:     false,
+		URL:         "https://shop.com",
+		Timeout:     10 * time.Second,
+		MinProducts: 1,
 	}
 
 	result, err := c.Run(context.Background(), cfg, nil)
-	// Timeout is not an error - we just return what we have
-	require.NoError(t, err)
-	// Result should exist even with few/no products (crawl completed with timeout)
-	assert.NotEmpty(t, result.CrawlID)
+	require.NoError(t, err) // Crawl itself doesn't error — it marks the crawl as failed
+
+	assert.Equal(t, 0, result.ProductsFound)
 }
 
 func TestCrawler_RunSavesToDatabase(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/robots.txt":
-			w.WriteHeader(http.StatusNotFound)
-		case "/":
-			w.Write([]byte(`<html><head>
-				<script type="application/ld+json">
-				{"@type":"Product","name":"DB Test Product","offers":{"price":"99.99"},"image":"https://img.com/db.jpg"}
-				</script>
-				</head><body></body></html>`))
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer server.Close()
-
 	pool := setupTestDB(t)
 	logDir := t.TempDir()
+
+	mockFC := &mockFirecrawlCrawler{
+		crawlSiteFn: func(ctx context.Context, siteURL string, cfg crawler.CrawlConfig) ([]crawler.PageResult, error) {
+			return []crawler.PageResult{
+				{
+					URL:      "https://shop.com/product/1",
+					Markdown: "# DB Test Product\n\nPrice: 99.99 PLN\n\nGreat product for testing database persistence with metadata extraction.",
+					Metadata: map[string]string{
+						"ogTitle": "DB Test Product",
+						"ogImage": "https://img.com/db.jpg",
+					},
+				},
+			}, nil
+		},
+	}
 
 	mockAI := &mockAIClient{}
 
@@ -298,7 +242,7 @@ func TestCrawler_RunSavesToDatabase(t *testing.T) {
 	productStore := store.NewProductStore(pool)
 
 	c := crawler.New(
-		crawler.NewHTTPFetcher(5*time.Second),
+		mockFC,
 		mockAI,
 		shopStore,
 		crawlStore,
@@ -307,10 +251,9 @@ func TestCrawler_RunSavesToDatabase(t *testing.T) {
 	)
 
 	cfg := crawler.CrawlConfig{
-		URL:         server.URL,
+		URL:         "https://shop.com",
 		Timeout:     10 * time.Second,
 		MinProducts: 1,
-		Verbose:     false,
 	}
 
 	result, err := c.Run(context.Background(), cfg, nil)

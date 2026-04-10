@@ -3,8 +3,10 @@ package crawler_test
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/jzy/howmuchyousay/internal/crawler"
@@ -19,11 +21,18 @@ func TestOpenAIClient_ExtractProducts(t *testing.T) {
 		assert.Equal(t, "POST", r.Method)
 		assert.Contains(t, r.Header.Get("Authorization"), "Bearer ")
 
+		// Read the request body and verify prompt mentions "markdown"
+		body, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		bodyStr := string(body)
+		assert.Contains(t, bodyStr, "markdown")
+		assert.NotContains(t, bodyStr, "HTML")
+
 		// Return a mock response with extracted products
 		resp := map[string]interface{}{
-			"id":      "chatcmpl-test",
-			"object":  "chat.completion",
-			"model":   "gpt-5-mini",
+			"id":     "chatcmpl-test",
+			"object": "chat.completion",
+			"model":  "gpt-5-mini",
 			"choices": []map[string]interface{}{
 				{
 					"index": 0,
@@ -48,50 +57,26 @@ func TestOpenAIClient_ExtractProducts(t *testing.T) {
 	client := crawler.NewOpenAIClient("test-api-key", "gpt-5-mini", server.URL)
 	ctx := context.Background()
 
-	products, tokensUsed, err := client.ExtractProducts(ctx, "<html><body>Product page HTML</body></html>", "https://shop.com/products")
+	markdownInput := strings.TrimSpace(`
+# Products
+
+## Laptop Dell XPS 15
+**Price:** $5,999.99
+![Laptop](https://img.com/dell.jpg)
+
+## iPhone 15 Pro
+**Price:** $5,499.00
+![iPhone](https://img.com/iphone.jpg)
+`)
+
+	products, tokensUsed, err := client.ExtractProducts(ctx, markdownInput, "https://shop.com/products")
 	require.NoError(t, err)
 	assert.Len(t, products, 2)
 	assert.Equal(t, "Laptop Dell XPS 15", products[0].Name)
 	assert.Equal(t, 5999.99, products[0].Price)
+	assert.Equal(t, "https://shop.com/products", products[0].SourceURL)
 	assert.Equal(t, "iPhone 15 Pro", products[1].Name)
 	assert.Equal(t, 500, tokensUsed)
-}
-
-func TestOpenAIClient_ExtractLinks(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := map[string]interface{}{
-			"id":      "chatcmpl-test",
-			"object":  "chat.completion",
-			"model":   "gpt-5-mini",
-			"choices": []map[string]interface{}{
-				{
-					"index": 0,
-					"message": map[string]interface{}{
-						"role":    "assistant",
-						"content": `["/products/laptops","/products/phones","/category/electronics"]`,
-					},
-					"finish_reason": "stop",
-				},
-			},
-			"usage": map[string]interface{}{
-				"prompt_tokens":     50,
-				"completion_tokens": 150,
-				"total_tokens":      200,
-			},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-	}))
-	defer server.Close()
-
-	client := crawler.NewOpenAIClient("test-api-key", "gpt-5-mini", server.URL)
-	ctx := context.Background()
-
-	links, tokensUsed, err := client.ExtractLinks(ctx, "<html><body>Category page</body></html>", "https://shop.com")
-	require.NoError(t, err)
-	assert.Len(t, links, 3)
-	assert.Equal(t, "/products/laptops", links[0])
-	assert.Equal(t, 200, tokensUsed)
 }
 
 func TestOpenAIClient_HandlesAPIError(t *testing.T) {
@@ -104,7 +89,7 @@ func TestOpenAIClient_HandlesAPIError(t *testing.T) {
 	client := crawler.NewOpenAIClient("test-api-key", "gpt-5-mini", server.URL)
 	ctx := context.Background()
 
-	_, _, err := client.ExtractProducts(ctx, "<html></html>", "https://shop.com")
+	_, _, err := client.ExtractProducts(ctx, "# Empty page", "https://shop.com")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "429")
 }
@@ -112,9 +97,9 @@ func TestOpenAIClient_HandlesAPIError(t *testing.T) {
 func TestOpenAIClient_HandlesInvalidJSON(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]interface{}{
-			"id":      "chatcmpl-test",
-			"object":  "chat.completion",
-			"model":   "gpt-5-mini",
+			"id":     "chatcmpl-test",
+			"object": "chat.completion",
+			"model":  "gpt-5-mini",
 			"choices": []map[string]interface{}{
 				{
 					"index": 0,
@@ -139,7 +124,7 @@ func TestOpenAIClient_HandlesInvalidJSON(t *testing.T) {
 	client := crawler.NewOpenAIClient("test-api-key", "gpt-5-mini", server.URL)
 	ctx := context.Background()
 
-	products, _, err := client.ExtractProducts(ctx, "<html></html>", "https://shop.com")
+	products, _, err := client.ExtractProducts(ctx, "# Some markdown content", "https://shop.com")
 	require.NoError(t, err)
 	// Invalid JSON from AI -> empty result, not an error
 	assert.Empty(t, products)

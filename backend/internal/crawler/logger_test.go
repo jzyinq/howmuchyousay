@@ -34,27 +34,28 @@ func TestCrawlLogger_WritesEntries(t *testing.T) {
 	logger, err := crawler.NewCrawlLogger(tmpDir, crawlID)
 	require.NoError(t, err)
 
-	logger.Log("FETCH", "Fetching https://example.com, status 200, 15000 bytes")
-	logger.Log("PARSE", "Found 2 JSON-LD products")
+	logger.Log("FIRECRAWL_START", "Starting Firecrawl job for https://example.com")
+	logger.Log("FIRECRAWL_PROGRESS", "Crawled 5/10 pages")
+	logger.Log("FIRECRAWL_COMPLETE", "Firecrawl job finished, 10 pages returned")
+	logger.Log("AI_REQUEST", "Sending markdown to AI for extraction")
 	logger.Log("PRODUCT_FOUND", "Product: Laptop Dell, Price: 5999.99")
-	logger.Log("ERROR", "Failed to parse page: invalid HTML")
+	logger.Log("ERROR", "Failed to extract from page")
 	logger.Close()
 
 	content, err := os.ReadFile(logger.FilePath())
 	require.NoError(t, err)
 
 	text := string(content)
-	assert.Contains(t, text, "[FETCH]")
-	assert.Contains(t, text, "https://example.com")
-	assert.Contains(t, text, "[PARSE]")
+	assert.Contains(t, text, "[FIRECRAWL_START]")
+	assert.Contains(t, text, "[FIRECRAWL_PROGRESS]")
+	assert.Contains(t, text, "[FIRECRAWL_COMPLETE]")
+	assert.Contains(t, text, "[AI_REQUEST]")
 	assert.Contains(t, text, "[PRODUCT_FOUND]")
 	assert.Contains(t, text, "[ERROR]")
 
-	// Each line should have a timestamp
 	lines := strings.Split(strings.TrimSpace(text), "\n")
-	assert.Len(t, lines, 4)
+	assert.Len(t, lines, 6)
 	for _, line := range lines {
-		// Timestamp format: 2026-04-09T12:00:00Z
 		assert.Regexp(t, `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}`, line)
 	}
 }
@@ -68,10 +69,10 @@ func TestCrawlLogger_CreatesDirectoryIfNeeded(t *testing.T) {
 	require.NoError(t, err)
 	defer logger.Close()
 
-	logger.Log("FETCH", "test entry")
+	logger.Log("FIRECRAWL_START", "test entry")
 	logger.Close()
 
 	content, err := os.ReadFile(logger.FilePath())
 	require.NoError(t, err)
-	assert.Contains(t, string(content), "[FETCH]")
+	assert.Contains(t, string(content), "[FIRECRAWL_START]")
 }

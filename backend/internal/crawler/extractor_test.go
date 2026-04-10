@@ -8,168 +8,188 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestExtractProducts_JSONLD_SingleProduct(t *testing.T) {
-	html := `<html><head>
-	<script type="application/ld+json">
-	{
-		"@context": "https://schema.org",
-		"@type": "Product",
-		"name": "iPhone 15 Pro",
-		"image": "https://example.com/iphone.jpg",
-		"offers": {
-			"@type": "Offer",
-			"price": "5499.00",
-			"priceCurrency": "PLN"
-		}
-	}
-	</script>
-	</head><body></body></html>`
-
-	products := crawler.ExtractProducts(html, "https://example.com/iphone")
-	require.Len(t, products, 1)
-	assert.Equal(t, "iPhone 15 Pro", products[0].Name)
-	assert.Equal(t, 5499.00, products[0].Price)
-	assert.Equal(t, "https://example.com/iphone.jpg", products[0].ImageURL)
-	assert.Equal(t, "https://example.com/iphone", products[0].SourceURL)
-}
-
-func TestExtractProducts_JSONLD_MultipleProducts(t *testing.T) {
-	html := `<html><head>
-	<script type="application/ld+json">
-	[
-		{
-			"@context": "https://schema.org",
-			"@type": "Product",
-			"name": "Product A",
-			"offers": {"price": "100.00"}
+func TestExtractProductsFromPage_WithOGProduct(t *testing.T) {
+	page := crawler.PageResult{
+		URL:      "https://shop.com/product/1",
+		Markdown: "# Cool Product\n\nSome description of the product.\n\nPrice: 4999.00 PLN",
+		Metadata: map[string]string{
+			"ogTitle": "Cool Product",
+			"ogImage": "https://shop.com/img/product1.jpg",
 		},
-		{
-			"@context": "https://schema.org",
-			"@type": "Product",
-			"name": "Product B",
-			"offers": {"price": "200.00"}
-		}
-	]
-	</script>
-	</head><body></body></html>`
-
-	products := crawler.ExtractProducts(html, "https://example.com/list")
-	require.Len(t, products, 2)
-	assert.Equal(t, "Product A", products[0].Name)
-	assert.Equal(t, "Product B", products[1].Name)
-}
-
-func TestExtractProducts_JSONLD_OffersArray(t *testing.T) {
-	html := `<html><head>
-	<script type="application/ld+json">
-	{
-		"@type": "Product",
-		"name": "Multi-offer Product",
-		"offers": [
-			{"price": "99.99"},
-			{"price": "109.99"}
-		]
 	}
-	</script>
-	</head><body></body></html>`
 
-	products := crawler.ExtractProducts(html, "https://example.com/multi")
+	products := crawler.ExtractProductsFromPage(page)
 	require.Len(t, products, 1)
-	assert.Equal(t, "Multi-offer Product", products[0].Name)
-	// Takes first offer price
-	assert.Equal(t, 99.99, products[0].Price)
+	assert.Equal(t, "Cool Product", products[0].Name)
+	assert.Equal(t, 4999.00, products[0].Price)
+	assert.Equal(t, "https://shop.com/img/product1.jpg", products[0].ImageURL)
+	assert.Equal(t, "https://shop.com/product/1", products[0].SourceURL)
 }
 
-func TestExtractProducts_JSONLD_ImageArray(t *testing.T) {
-	html := `<html><head>
-	<script type="application/ld+json">
-	{
-		"@type": "Product",
-		"name": "Image Array Product",
-		"image": ["https://example.com/img1.jpg", "https://example.com/img2.jpg"],
-		"offers": {"price": "50.00"}
+func TestExtractProductsFromPage_MultiplePricesReturnsNil(t *testing.T) {
+	// Multiple prices in markdown — too ambiguous for metadata extraction
+	page := crawler.PageResult{
+		URL:      "https://shop.com/product/2",
+		Markdown: "# Product A - 299.99 PLN\n\n# Product B - 499.99 PLN",
+		Metadata: map[string]string{
+			"ogTitle": "Products",
+		},
 	}
-	</script>
-	</head><body></body></html>`
 
-	products := crawler.ExtractProducts(html, "https://example.com/images")
-	require.Len(t, products, 1)
-	assert.Equal(t, "https://example.com/img1.jpg", products[0].ImageURL)
+	products := crawler.ExtractProductsFromPage(page)
+	assert.Empty(t, products)
 }
 
-func TestExtractProducts_JSONLD_NestedGraph(t *testing.T) {
-	html := `<html><head>
-	<script type="application/ld+json">
-	{
-		"@context": "https://schema.org",
-		"@graph": [
-			{
-				"@type": "WebPage",
-				"name": "Some page"
-			},
-			{
-				"@type": "Product",
-				"name": "Nested Product",
-				"offers": {"price": "299.99"}
-			}
-		]
+func TestExtractProductsFromPage_NoMetadata(t *testing.T) {
+	page := crawler.PageResult{
+		URL:      "https://shop.com/page",
+		Markdown: "# Some page content",
+		Metadata: map[string]string{},
 	}
-	</script>
-	</head><body></body></html>`
 
-	products := crawler.ExtractProducts(html, "https://example.com/nested")
-	require.Len(t, products, 1)
-	assert.Equal(t, "Nested Product", products[0].Name)
-	assert.Equal(t, 299.99, products[0].Price)
+	products := crawler.ExtractProductsFromPage(page)
+	assert.Empty(t, products)
 }
 
-func TestExtractProducts_OpenGraph(t *testing.T) {
-	html := `<html><head>
-	<meta property="og:type" content="product" />
-	<meta property="og:title" content="OG Product" />
-	<meta property="product:price:amount" content="199.99" />
-	<meta property="og:image" content="https://example.com/og.jpg" />
-	</head><body></body></html>`
+func TestExtractProductsFromPage_EmptyMarkdown(t *testing.T) {
+	page := crawler.PageResult{
+		URL:      "https://shop.com/empty",
+		Markdown: "",
+		Metadata: map[string]string{},
+	}
 
-	products := crawler.ExtractProducts(html, "https://example.com/og")
+	products := crawler.ExtractProductsFromPage(page)
+	assert.Empty(t, products)
+}
+
+func TestExtractProductsFromPage_FallbackToTitle(t *testing.T) {
+	page := crawler.PageResult{
+		URL:      "https://shop.com/product/3",
+		Markdown: "# Product page\n\nOnly 199.99 for this item",
+		Metadata: map[string]string{
+			"title": "Fallback Title Product",
+		},
+	}
+
+	products := crawler.ExtractProductsFromPage(page)
 	require.Len(t, products, 1)
-	assert.Equal(t, "OG Product", products[0].Name)
+	assert.Equal(t, "Fallback Title Product", products[0].Name)
 	assert.Equal(t, 199.99, products[0].Price)
-	assert.Equal(t, "https://example.com/og.jpg", products[0].ImageURL)
 }
 
-func TestExtractProducts_NoStructuredData(t *testing.T) {
-	html := `<html><head><title>Just a page</title></head>
-	<body><h1>No products here</h1></body></html>`
+func TestExtractProductsFromPage_CommaSeparatedPrice(t *testing.T) {
+	page := crawler.PageResult{
+		URL:      "https://shop.pl/product/4",
+		Markdown: "# Polish Product\n\nCena: 1499,99 zł",
+		Metadata: map[string]string{
+			"ogTitle": "Polish Product",
+		},
+	}
 
-	products := crawler.ExtractProducts(html, "https://example.com/empty")
+	products := crawler.ExtractProductsFromPage(page)
+	require.Len(t, products, 1)
+	assert.Equal(t, 1499.99, products[0].Price)
+}
+
+func TestExtractProductsFromPage_NoPriceInMarkdown(t *testing.T) {
+	page := crawler.PageResult{
+		URL:      "https://shop.com/article",
+		Markdown: "# Some Article\n\nLong article content without any prices.",
+		Metadata: map[string]string{
+			"ogTitle": "Some Article",
+		},
+	}
+
+	products := crawler.ExtractProductsFromPage(page)
 	assert.Empty(t, products)
 }
 
-func TestExtractProducts_InvalidJSON(t *testing.T) {
-	html := `<html><head>
-	<script type="application/ld+json">{invalid json}</script>
-	</head><body></body></html>`
+func TestHasProductSignals_WithProductKeywords(t *testing.T) {
+	tests := []struct {
+		name     string
+		markdown string
+		want     bool
+	}{
+		{"add to cart", "Click to add to cart now", true},
+		{"buy now", "Buy now and save!", true},
+		{"Polish add to cart", "Dodaj do koszyka aby kupić", true},
+		{"price keyword", "Current price: $50", true},
+		{"zł currency", "Cena: 100 zł", true},
+		{"PLN currency", "Koszt: 200 PLN", true},
+	}
 
-	products := crawler.ExtractProducts(html, "https://example.com/broken")
-	assert.Empty(t, products)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			page := crawler.PageResult{
+				Markdown: tt.markdown,
+				Metadata: map[string]string{},
+			}
+			assert.True(t, crawler.HasProductSignals(page))
+		})
+	}
 }
 
-func TestExtractLinks(t *testing.T) {
-	html := `<html><body>
-	<a href="/products/1">Product 1</a>
-	<a href="/products/2">Product 2</a>
-	<a href="/category/electronics">Electronics</a>
-	<a href="https://external.com/page">External</a>
-	<a href="#">Empty</a>
-	</body></html>`
+func TestHasProductSignals_WithoutProductKeywords(t *testing.T) {
+	page := crawler.PageResult{
+		Markdown: "# About Us\n\nWe are a company that does things.",
+		Metadata: map[string]string{
+			"title": "About Us - Company",
+		},
+	}
 
-	links := crawler.ExtractLinks(html, "https://example.com")
-	assert.Contains(t, links, "https://example.com/products/1")
-	assert.Contains(t, links, "https://example.com/products/2")
-	assert.Contains(t, links, "https://example.com/category/electronics")
-	// External links included
-	assert.Contains(t, links, "https://external.com/page")
-	// Fragment-only links excluded
-	assert.NotContains(t, links, "#")
+	assert.False(t, crawler.HasProductSignals(page))
+}
+
+func TestHasProductSignals_WithPricePattern(t *testing.T) {
+	page := crawler.PageResult{
+		Markdown: "This item costs 4999,99 and is available now.",
+		Metadata: map[string]string{},
+	}
+
+	assert.True(t, crawler.HasProductSignals(page))
+}
+
+func TestHasProductSignals_WithDotPricePattern(t *testing.T) {
+	page := crawler.PageResult{
+		Markdown: "Special offer: 199.99 only today",
+		Metadata: map[string]string{},
+	}
+
+	assert.True(t, crawler.HasProductSignals(page))
+}
+
+func TestHasProductSignals_KeywordInTitle(t *testing.T) {
+	page := crawler.PageResult{
+		Markdown: "Some generic content without keywords",
+		Metadata: map[string]string{
+			"title": "Buy Now - Best Deals",
+		},
+	}
+
+	assert.True(t, crawler.HasProductSignals(page))
+}
+
+func TestPageHasContent(t *testing.T) {
+	tests := []struct {
+		name     string
+		markdown string
+		want     bool
+	}{
+		{"empty string", "", false},
+		{"whitespace only", "   \n\t\n   ", false},
+		{"short content", "Hello", false},
+		{"exactly 50 chars", "01234567890123456789012345678901234567890123456789", false},
+		{"51 chars", "012345678901234567890123456789012345678901234567890", true},
+		{"long content", "This is a page with enough content to be considered valid for processing.", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			page := crawler.PageResult{
+				Markdown: tt.markdown,
+				Metadata: map[string]string{},
+			}
+			assert.Equal(t, tt.want, crawler.PageHasContent(page))
+		})
+	}
 }
