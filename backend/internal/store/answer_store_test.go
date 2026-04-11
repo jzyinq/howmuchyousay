@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jzy/howmuchyousay/internal/models"
 	"github.com/jzy/howmuchyousay/internal/store"
 	"github.com/stretchr/testify/assert"
@@ -17,7 +18,7 @@ func TestAnswerStore_Create(t *testing.T) {
 
 	_, round, player := createTestRound(t, pool, "https://answer-test.com")
 
-	answer, err := answerStore.Create(ctx, round.ID, player.ID, "b", true, 2)
+	answer, err := answerStore.Create(ctx, pool, round.ID, player.ID, "b", true, 2)
 	require.NoError(t, err)
 	assert.NotEmpty(t, answer.ID)
 	assert.Equal(t, "b", answer.Answer)
@@ -36,9 +37,9 @@ func TestAnswerStore_GetByRoundID(t *testing.T) {
 	player2, err := playerStore.Create(ctx, session.ID, "Player2", false)
 	require.NoError(t, err)
 
-	_, err = answerStore.Create(ctx, round.ID, player1.ID, "a", false, 0)
+	_, err = answerStore.Create(ctx, pool, round.ID, player1.ID, "a", false, 0)
 	require.NoError(t, err)
-	_, err = answerStore.Create(ctx, round.ID, player2.ID, "b", true, 2)
+	_, err = answerStore.Create(ctx, pool, round.ID, player2.ID, "b", true, 2)
 	require.NoError(t, err)
 
 	answers, err := answerStore.GetByRoundID(ctx, round.ID)
@@ -53,7 +54,7 @@ func TestAnswerStore_CountByRoundID(t *testing.T) {
 
 	_, round, player := createTestRound(t, pool, "https://answer-count-test.com")
 
-	_, err := answerStore.Create(ctx, round.ID, player.ID, "a", false, 0)
+	_, err := answerStore.Create(ctx, pool, round.ID, player.ID, "a", false, 0)
 	require.NoError(t, err)
 
 	count, err := answerStore.CountByRoundID(ctx, round.ID)
@@ -80,12 +81,32 @@ func TestAnswerStore_GetPlayerTotalScore(t *testing.T) {
 	round2, err := roundStore.Create(ctx, session.ID, 2, models.RoundTypeComparison, products[2].ID, &productBID2, "a", 3)
 	require.NoError(t, err)
 
-	_, err = answerStore.Create(ctx, round1.ID, player.ID, "b", true, 2)
+	_, err = answerStore.Create(ctx, pool, round1.ID, player.ID, "b", true, 2)
 	require.NoError(t, err)
-	_, err = answerStore.Create(ctx, round2.ID, player.ID, "a", true, 3)
+	_, err = answerStore.Create(ctx, pool, round2.ID, player.ID, "a", true, 3)
 	require.NoError(t, err)
 
 	total, err := answerStore.GetPlayerTotalScore(ctx, session.ID, player.ID)
 	require.NoError(t, err)
 	assert.Equal(t, 5, total)
+}
+
+func TestAnswerStore_Create_InTransaction_RollsBack(t *testing.T) {
+	pool := setupTestDB(t)
+	answerStore := store.NewAnswerStore(pool)
+	ctx := context.Background()
+
+	_, round, player := createTestRound(t, pool, "https://answer-tx-test.com")
+
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	require.NoError(t, err)
+
+	_, err = answerStore.Create(ctx, tx, round.ID, player.ID, "a", false, 0)
+	require.NoError(t, err)
+
+	require.NoError(t, tx.Rollback(ctx))
+
+	count, err := answerStore.CountByRoundID(ctx, round.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 0, count, "answer inserted in rolled-back tx must not persist")
 }

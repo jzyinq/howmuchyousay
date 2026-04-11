@@ -11,16 +11,23 @@ import (
 )
 
 type RoundStore struct {
-	pool *pgxpool.Pool
+	exec DBExec
 }
 
 func NewRoundStore(pool *pgxpool.Pool) *RoundStore {
-	return &RoundStore{pool: pool}
+	return &RoundStore{exec: pool}
+}
+
+// NewRoundStoreForExec returns a RoundStore that uses the given DBExec for
+// writes. Used when rounds must be inserted inside an externally-managed
+// transaction.
+func NewRoundStoreForExec(db DBExec) *RoundStore {
+	return &RoundStore{exec: db}
 }
 
 func (s *RoundStore) Create(ctx context.Context, sessionID uuid.UUID, roundNumber int, roundType models.RoundType, productAID uuid.UUID, productBID *uuid.UUID, correctAnswer string, difficultyScore int) (*models.Round, error) {
 	round := &models.Round{}
-	err := s.pool.QueryRow(ctx,
+	err := s.exec.QueryRow(ctx,
 		`INSERT INTO rounds (session_id, round_number, round_type, product_a_id, product_b_id, correct_answer, difficulty_score)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7)
 		 RETURNING id, session_id, round_number, round_type, product_a_id, product_b_id, correct_answer, difficulty_score`,
@@ -34,7 +41,7 @@ func (s *RoundStore) Create(ctx context.Context, sessionID uuid.UUID, roundNumbe
 }
 
 func (s *RoundStore) GetBySessionID(ctx context.Context, sessionID uuid.UUID) ([]models.Round, error) {
-	rows, err := s.pool.Query(ctx,
+	rows, err := s.exec.Query(ctx,
 		`SELECT id, session_id, round_number, round_type, product_a_id, product_b_id, correct_answer, difficulty_score
 		 FROM rounds WHERE session_id = $1
 		 ORDER BY round_number ASC`,
@@ -59,7 +66,7 @@ func (s *RoundStore) GetBySessionID(ctx context.Context, sessionID uuid.UUID) ([
 
 func (s *RoundStore) GetBySessionAndNumber(ctx context.Context, sessionID uuid.UUID, roundNumber int) (*models.Round, error) {
 	round := &models.Round{}
-	err := s.pool.QueryRow(ctx,
+	err := s.exec.QueryRow(ctx,
 		`SELECT id, session_id, round_number, round_type, product_a_id, product_b_id, correct_answer, difficulty_score
 		 FROM rounds WHERE session_id = $1 AND round_number = $2`,
 		sessionID, roundNumber,

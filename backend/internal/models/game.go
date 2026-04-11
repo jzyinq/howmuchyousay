@@ -21,17 +21,20 @@ const (
 	GameStatusLobby      GameStatus = "lobby"
 	GameStatusInProgress GameStatus = "in_progress"
 	GameStatusFinished   GameStatus = "finished"
+	GameStatusFailed     GameStatus = "failed"
 )
 
 type GameSession struct {
-	ID          uuid.UUID  `json:"id"`
-	RoomCode    *string    `json:"room_code"`
-	HostNick    string     `json:"host_nick"`
-	ShopID      uuid.UUID  `json:"shop_id"`
-	GameMode    GameMode   `json:"game_mode"`
-	RoundsTotal int        `json:"rounds_total"`
-	Status      GameStatus `json:"status"`
-	CrawlID     *uuid.UUID `json:"crawl_id"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	ID           uuid.UUID  `json:"id"`
+	RoomCode     *string    `json:"room_code"`
+	HostNick     string     `json:"host_nick"`
+	ShopID       uuid.UUID  `json:"shop_id"`
+	GameMode     GameMode   `json:"game_mode"`
+	RoundsTotal  int        `json:"rounds_total"`
+	Status       GameStatus `json:"status"`
+	CrawlID      *uuid.UUID `json:"crawl_id"`
+	CurrentRound int        `json:"current_round"`
+	ErrorMessage *string    `json:"error_message,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 }

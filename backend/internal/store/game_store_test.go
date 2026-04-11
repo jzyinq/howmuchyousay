@@ -83,7 +83,7 @@ func TestGameStore_UpdateStatus(t *testing.T) {
 	session, err := gameStore.Create(ctx, shop.ID, "P1", models.GameModeGuess, 10)
 	require.NoError(t, err)
 
-	err = gameStore.UpdateStatus(ctx, session.ID, models.GameStatusInProgress)
+	err = gameStore.UpdateStatus(ctx, pool, session.ID, models.GameStatusInProgress)
 	require.NoError(t, err)
 
 	updated, err := gameStore.GetByID(ctx, session.ID)
@@ -112,4 +112,55 @@ func TestGameStore_SetCrawlID(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, updated.CrawlID)
 	assert.Equal(t, crawl.ID, *updated.CrawlID)
+}
+
+func TestGameStore_GetByID_NewColumns(t *testing.T) {
+	pool := setupTestDB(t)
+	gameStore := store.NewGameStore(pool)
+	ctx := context.Background()
+
+	shop := createTestShop(t, pool, "https://new-columns-test.com")
+	session, err := gameStore.Create(ctx, shop.ID, "P1", models.GameModeComparison, 10)
+	require.NoError(t, err)
+
+	found, err := gameStore.GetByID(ctx, session.ID)
+	require.NoError(t, err)
+	require.NotNil(t, found)
+	assert.Equal(t, 1, found.CurrentRound, "new sessions start at round 1")
+	assert.Nil(t, found.ErrorMessage, "new sessions have no error message")
+}
+
+func TestGameStore_IncrementCurrentRound(t *testing.T) {
+	pool := setupTestDB(t)
+	gameStore := store.NewGameStore(pool)
+	ctx := context.Background()
+
+	shop := createTestShop(t, pool, "https://increment-test.com")
+	session, err := gameStore.Create(ctx, shop.ID, "P1", models.GameModeComparison, 10)
+	require.NoError(t, err)
+
+	err = gameStore.IncrementCurrentRound(ctx, pool, session.ID)
+	require.NoError(t, err)
+
+	updated, err := gameStore.GetByID(ctx, session.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, updated.CurrentRound)
+}
+
+func TestGameStore_SetErrorMessage(t *testing.T) {
+	pool := setupTestDB(t)
+	gameStore := store.NewGameStore(pool)
+	ctx := context.Background()
+
+	shop := createTestShop(t, pool, "https://errmsg-test.com")
+	session, err := gameStore.Create(ctx, shop.ID, "P1", models.GameModeComparison, 10)
+	require.NoError(t, err)
+
+	err = gameStore.SetErrorMessage(ctx, session.ID, "crawl timed out")
+	require.NoError(t, err)
+
+	updated, err := gameStore.GetByID(ctx, session.ID)
+	require.NoError(t, err)
+	require.NotNil(t, updated.ErrorMessage)
+	assert.Equal(t, "crawl timed out", *updated.ErrorMessage)
 }

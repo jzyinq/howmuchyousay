@@ -16,9 +16,9 @@ func NewAnswerStore(pool *pgxpool.Pool) *AnswerStore {
 	return &AnswerStore{pool: pool}
 }
 
-func (s *AnswerStore) Create(ctx context.Context, roundID, playerID uuid.UUID, answer string, isCorrect bool, pointsEarned int) (*models.Answer, error) {
+func (s *AnswerStore) Create(ctx context.Context, db DBExec, roundID, playerID uuid.UUID, answer string, isCorrect bool, pointsEarned int) (*models.Answer, error) {
 	a := &models.Answer{}
-	err := s.pool.QueryRow(ctx,
+	err := db.QueryRow(ctx,
 		`INSERT INTO answers (round_id, player_id, answer, is_correct, points_earned)
 		 VALUES ($1, $2, $3, $4, $5)
 		 RETURNING id, round_id, player_id, answer, is_correct, points_earned, answered_at`,

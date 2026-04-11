@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"errors"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jzy/howmuchyousay/internal/models"
 )
@@ -87,4 +89,20 @@ func (s *ProductStore) GetRandomByShopID(ctx context.Context, shopID uuid.UUID, 
 		products = append(products, p)
 	}
 	return products, rows.Err()
+}
+
+func (s *ProductStore) GetByID(ctx context.Context, id uuid.UUID) (*models.Product, error) {
+	p := &models.Product{}
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, shop_id, crawl_id, name, price, image_url, source_url, created_at
+		 FROM products WHERE id = $1`,
+		id,
+	).Scan(&p.ID, &p.ShopID, &p.CrawlID, &p.Name, &p.Price, &p.ImageURL, &p.SourceURL, &p.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
 }
