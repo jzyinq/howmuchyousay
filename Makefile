@@ -1,4 +1,4 @@
-.PHONY: dev test migrate-up migrate-down build
+.PHONY: dev test migrate-up migrate-down build frontend-dev frontend-install
 
 dev:
 	docker compose up -d postgres firecrawl
@@ -17,3 +17,9 @@ migrate-down:
 build:
 	cd backend && go build -o ../bin/server ./cmd/server/
 	cd backend && go build -o ../bin/crawler ./cmd/crawler/
+
+frontend-install:
+	cd frontend && npm install
+
+frontend-dev:
+	cd frontend && npm run dev

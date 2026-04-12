@@ -3,6 +3,7 @@ package server
 import (
 	"log/slog"
 	"math/rand/v2"
+	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -36,7 +37,7 @@ func New(d Deps) *Handler { return &Handler{Deps: d} }
 
 func (h *Handler) Routes() *gin.Engine {
 	r := gin.New()
-	r.Use(gin.Logger(), gin.Recovery(), h.errorMiddleware())
+	r.Use(h.corsMiddleware(), gin.Logger(), gin.Recovery(), h.errorMiddleware())
 	api := r.Group("/api")
 	{
 		api.POST("/game", h.CreateGame)
@@ -46,5 +47,18 @@ func (h *Handler) Routes() *gin.Engine {
 		api.GET("/game/:session_id/results", h.GetResults)
 	}
 	return r
+}
+
+func (h *Handler) corsMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Access-Control-Allow-Origin", "*")
+		c.Header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		c.Header("Access-Control-Allow-Headers", "Content-Type")
+		if c.Request.Method == http.MethodOptions {
+			c.AbortWithStatus(http.StatusNoContent)
+			return
+		}
+		c.Next()
+	}
 }
 
