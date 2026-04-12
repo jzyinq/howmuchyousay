@@ -44,10 +44,11 @@ export function useSubmitAnswer(sessionId: string, roundNumber: number) {
   })
 }
 
-export function useResults(sessionId: string) {
+export function useResults(sessionId: string, enabled = true) {
   return useQuery({
     queryKey: ["results", sessionId],
     queryFn: () => get<ResultsResponse>(`/api/game/${sessionId}/results`),
     staleTime: Infinity,
+    enabled,
   })
 }

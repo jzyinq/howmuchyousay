@@ -1,6 +1,8 @@
 import { useState, useEffect } from "react"
 import { useParams, useNavigate, Link } from "react-router"
 import { useSession, useRound, useSubmitAnswer } from "@/api/gameApi"
+import { ApiRequestError } from "@/api/client"
+import { Button } from "@/components/ui/button"
 import ComparisonRound from "@/components/game/ComparisonRound"
 import RoundResult from "@/components/game/RoundResult"
 import RoundCounter from "@/components/game/RoundCounter"
@@ -17,6 +19,7 @@ export default function GamePage() {
   const [roundPhase, setRoundPhase] = useState<"answering" | "result">("answering")
   const [currentResult, setCurrentResult] = useState<AnswerResponse | null>(null)
   const [roundHistory, setRoundHistory] = useState<RoundHistoryEntry[]>([])
+  const [submitError, setSubmitError] = useState<string | null>(null)
 
   useEffect(() => {
     if (session && localRound === 0) {
@@ -24,10 +27,23 @@ export default function GamePage() {
     }
   }, [session, localRound])
 
-  const { data: round, isLoading: roundLoading } = useRound(sessionId!, localRound)
+  // Redirect finished sessions to results
+  useEffect(() => {
+    if (session?.status === "finished") {
+      navigate(`/game/${sessionId}/results`, { replace: true })
+    }
+  }, [session?.status, sessionId, navigate])
+
+  const {
+    data: round,
+    isLoading: roundLoading,
+    error: roundError,
+    refetch: refetchRound,
+  } = useRound(sessionId!, localRound)
   const submitAnswer = useSubmitAnswer(sessionId!, localRound)
 
   function handleSubmitAnswer(answer: "a" | "b") {
+    setSubmitError(null)
     submitAnswer.mutate(answer, {
       onSuccess: (result) => {
         setCurrentResult(result)
@@ -49,6 +65,22 @@ export default function GamePage() {
           ])
         }
       },
+      onError: (err) => {
+        if (err instanceof ApiRequestError && err.code === "already_answered") {
+          // Treat as success — extract data from error details
+          const details = err.details
+          if (details) {
+            setCurrentResult({
+              is_correct: details.is_correct as boolean,
+              points: details.points as number,
+              correct_answer: details.correct_answer as string,
+            })
+            setRoundPhase("result")
+          }
+        } else {
+          setSubmitError("Failed to submit answer. Please try again.")
+        }
+      },
     })
   }
 
@@ -62,11 +94,7 @@ export default function GamePage() {
     setLocalRound((prev) => prev + 1)
     setRoundPhase("answering")
     setCurrentResult(null)
-  }
-
-  if (!sessionId) {
-    navigate("/")
-    return null
+    setSubmitError(null)
   }
 
   if (sessionLoading) {
@@ -89,7 +117,6 @@ export default function GamePage() {
   }
 
   if (session.status === "finished") {
-    navigate(`/game/${sessionId}/results`)
     return null
   }
 
@@ -118,7 +145,12 @@ export default function GamePage() {
         <ScoreTracker score={totalScore} />
       </div>
 
-      {roundLoading ? (
+      {roundError ? (
+        <div className="flex flex-col items-center gap-4 mt-8">
+          <p className="text-foreground font-heading">Failed to load round</p>
+          <Button onClick={() => refetchRound()}>Retry</Button>
+        </div>
+      ) : roundLoading ? (
         <p className="text-foreground font-heading mt-8">Loading round...</p>
       ) : round && round.product_a && round.product_b ? (
         <>
@@ -130,6 +162,11 @@ export default function GamePage() {
             isSubmitting={submitAnswer.isPending}
             result={roundPhase === "result" ? currentResult : null}
           />
+          {submitError && (
+            <p className="text-sm font-base text-red-600 border-2 border-red-600 rounded-base p-2 bg-red-50">
+              {submitError}
+            </p>
+          )}
           {roundPhase === "result" && currentResult && (
             <RoundResult
               isCorrect={currentResult.is_correct}

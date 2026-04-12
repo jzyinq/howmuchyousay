@@ -15,7 +15,8 @@ export default function ResultsPage() {
   const location = useLocation()
   const state = location.state as LocationState | null
 
-  const { data: results, isLoading } = useResults(sessionId!)
+  const hasState = !!state && state.roundHistory.length > 0
+  const { data: results, isLoading } = useResults(sessionId!, !hasState)
 
   if (state && state.roundHistory.length > 0) {
     return (
