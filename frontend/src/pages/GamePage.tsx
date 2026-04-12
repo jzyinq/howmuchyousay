@@ -74,6 +74,8 @@ export default function GamePage() {
               is_correct: details.is_correct as boolean,
               points: details.points as number,
               correct_answer: details.correct_answer as string,
+              price_a: details.price_a as number,
+              price_b: details.price_b as number | undefined,
             })
             setRoundPhase("result")
           }

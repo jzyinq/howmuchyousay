@@ -380,10 +380,15 @@ func (h *Handler) PostAnswer(c *gin.Context) {
 			}
 			for _, a := range existing {
 				if a.PlayerID == playerID {
-					c.Error(ErrConflict("already_answered", "answer already submitted").
+					errDetails := ErrConflict("already_answered", "answer already submitted").
 						With("is_correct", a.IsCorrect).
 						With("points", a.PointsEarned).
-						With("correct_answer", correctAnswerForResponse))
+						With("correct_answer", correctAnswerForResponse).
+						With("price_a", productA.Price)
+					if productB != nil {
+						errDetails = errDetails.With("price_b", productB.Price)
+					}
+					c.Error(errDetails)
 					return
 				}
 			}
@@ -416,11 +421,16 @@ func (h *Handler) PostAnswer(c *gin.Context) {
 	}
 	committed = true
 
-	c.JSON(http.StatusOK, AnswerResponse{
+	resp := AnswerResponse{
 		IsCorrect:     isCorrect,
 		Points:        points,
 		CorrectAnswer: correctAnswerForResponse,
-	})
+		PriceA:        productA.Price,
+	}
+	if productB != nil {
+		resp.PriceB = productB.Price
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // GetResults handles GET /api/game/:session_id/results.

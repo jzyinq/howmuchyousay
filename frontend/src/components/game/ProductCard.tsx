@@ -9,6 +9,7 @@ interface ProductCardProps {
   disabled: boolean
   isCorrectAnswer?: boolean
   isWrongPick?: boolean
+  revealedPrice?: number
   onClick: () => void
 }
 
@@ -19,6 +20,7 @@ export default function ProductCard({
   disabled,
   isCorrectAnswer,
   isWrongPick,
+  revealedPrice,
   onClick,
 }: ProductCardProps) {
   return (
@@ -52,6 +54,11 @@ export default function ProductCard({
         <p className="text-center text-sm font-heading leading-tight">
           {product.name}
         </p>
+        {revealedPrice !== undefined && (
+          <p className="text-lg font-heading text-foreground">
+            {revealedPrice.toFixed(2)} zł
+          </p>
+        )}
         {isCorrectAnswer && (
           <p className="text-sm font-heading text-green-600">
             ✓ More expensive

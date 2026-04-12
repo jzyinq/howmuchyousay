@@ -34,6 +34,7 @@ export default function ComparisonRound({
           disabled={answered}
           isCorrectAnswer={answered && result.correct_answer === "a"}
           isWrongPick={answered && selected === "a" && result.correct_answer !== "a"}
+          revealedPrice={answered ? result.price_a : undefined}
           onClick={() => setSelected("a")}
         />
         <div className="flex items-center text-2xl font-heading text-foreground/30 self-center">
@@ -46,6 +47,7 @@ export default function ComparisonRound({
           disabled={answered}
           isCorrectAnswer={answered && result.correct_answer === "b"}
           isWrongPick={answered && selected === "b" && result.correct_answer !== "b"}
+          revealedPrice={answered ? result.price_b : undefined}
           onClick={() => setSelected("b")}
         />
       </div>

@@ -38,6 +38,8 @@ export interface AnswerResponse {
   is_correct: boolean
   points: number
   correct_answer: string
+  price_a: number
+  price_b?: number
 }
 
 export interface PlayerScore {

@@ -60,9 +60,11 @@ type ProductDTO struct {
 }
 
 type AnswerResponse struct {
-	IsCorrect     bool   `json:"is_correct"`
-	Points        int    `json:"points"`
-	CorrectAnswer string `json:"correct_answer"`
+	IsCorrect     bool    `json:"is_correct"`
+	Points        int     `json:"points"`
+	CorrectAnswer string  `json:"correct_answer"`
+	PriceA        float64 `json:"price_a"`
+	PriceB        float64 `json:"price_b,omitempty"`
 }
 
 type ResultsResponse struct {
