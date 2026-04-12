@@ -35,7 +35,7 @@ func TestGetSession_InvalidUUID(t *testing.T) {
 
 func TestGetSession_SkipCrawlCreated_ReturnsInProgress(t *testing.T) {
 	h, pool, _ := setupTestHandler(t)
-	_, _ = seedShopWithProducts(t, pool, "https://getsession.com", 20)
+	_, _ = seedShopWithProducts(t, pool, "getsession.com", 20)
 
 	w := postJSON(t, h, "/api/game", map[string]any{
 		"nick":       "host",

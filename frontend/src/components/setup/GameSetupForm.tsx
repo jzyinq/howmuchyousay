@@ -24,10 +24,9 @@ export default function GameSetupForm() {
       return
     }
 
-    try {
-      new URL(shopUrl)
-    } catch {
-      setError("Please enter a valid URL")
+    const trimmed = shopUrl.trim()
+    if (!trimmed || !trimmed.includes(".")) {
+      setError("Please enter a valid shop domain (e.g. allegro.pl)")
       return
     }
 
@@ -81,8 +80,8 @@ export default function GameSetupForm() {
             <Label htmlFor="shop-url">Shop URL</Label>
             <Input
               id="shop-url"
-              placeholder="https://example-shop.com"
-              type="url"
+              placeholder="allegro.pl"
+              type="text"
               value={shopUrl}
               onChange={(e) => setShopUrl(e.target.value)}
               required

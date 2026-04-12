@@ -66,7 +66,7 @@ func TestCreateGame_Validation_UnknownGameMode(t *testing.T) {
 func TestCreateGame_SkipCrawl_Success(t *testing.T) {
 	h, pool, _ := setupTestHandler(t)
 	ctx := context.Background()
-	_, _ = seedShopWithProducts(t, pool, "https://skipcrawl-success.com", 20)
+	_, _ = seedShopWithProducts(t, pool, "skipcrawl-success.com", 20)
 
 	w := postJSON(t, h, "/api/game", map[string]any{
 		"nick":       "host",
@@ -100,7 +100,7 @@ func TestCreateGame_SkipCrawl_Success(t *testing.T) {
 
 func TestCreateGame_SkipCrawl_NotEnoughProducts(t *testing.T) {
 	h, pool, _ := setupTestHandler(t)
-	_, _ = seedShopWithProducts(t, pool, "https://skipcrawl-few.com", 5)
+	_, _ = seedShopWithProducts(t, pool, "skipcrawl-few.com", 5)
 
 	w := postJSON(t, h, "/api/game", map[string]any{
 		"nick":       "host",
@@ -119,7 +119,7 @@ func TestCreateGame_WithCrawl_Success(t *testing.T) {
 	h, pool, fake := setupTestHandler(t)
 	ctx := context.Background()
 
-	shop, products := seedShopWithProducts(t, pool, "https://withcrawl-success.com", 20)
+	shop, products := seedShopWithProducts(t, pool, "withcrawl-success.com", 20)
 
 	fake.done = make(chan struct{})
 	fake.behavior = func(ctx context.Context, cfg crawler.CrawlConfig, sessionID *uuid.UUID) (*crawler.CrawlResult, error) {

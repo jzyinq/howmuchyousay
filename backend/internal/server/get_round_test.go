@@ -16,7 +16,7 @@ import (
 
 func createSkipCrawlSession(t *testing.T, h *Handler, shopURL, mode string) uuid.UUID {
 	t.Helper()
-	_, _ = seedShopWithProducts(t, h.Pool, shopURL, 20)
+	_, _ = seedShopWithProducts(t, h.Pool, normalizeShopURL(shopURL), 20)
 	w := postJSON(t, h, "/api/game", map[string]any{
 		"nick":       "host",
 		"shop_url":   shopURL,

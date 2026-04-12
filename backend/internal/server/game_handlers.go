@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -15,6 +17,24 @@ import (
 	"github.com/jzy/howmuchyousay/internal/models"
 )
 
+// normalizeShopURL extracts the bare domain from a URL or plain domain —
+// strips scheme, www. prefix, trailing slashes, path/query/fragment.
+// Accepts both "https://www.sferis.pl/" and "sferis.pl".
+func normalizeShopURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	// If no scheme, add one so url.Parse treats it as a host, not a path.
+	if !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	host := strings.ToLower(u.Hostname())
+	host = strings.TrimPrefix(host, "www.")
+	return host
+}
+
 // CreateGame handles POST /api/game.
 func (h *Handler) CreateGame(c *gin.Context) {
 	var req CreateGameRequest
@@ -22,6 +42,7 @@ func (h *Handler) CreateGame(c *gin.Context) {
 		c.Error(ErrBadRequest(err.Error()))
 		return
 	}
+	req.ShopURL = normalizeShopURL(req.ShopURL)
 	ctx := c.Request.Context()
 
 	shop, err := h.Shops.GetByURL(ctx, req.ShopURL)

@@ -11,7 +11,7 @@ import (
 
 type CreateGameRequest struct {
 	Nick      string          `json:"nick"       binding:"required,min=1,max=32"`
-	ShopURL   string          `json:"shop_url"   binding:"required,url"`
+	ShopURL   string          `json:"shop_url"   binding:"required"`
 	GameMode  models.GameMode `json:"game_mode"  binding:"required,oneof=comparison guess"`
 	SkipCrawl bool            `json:"skip_crawl"`
 }
